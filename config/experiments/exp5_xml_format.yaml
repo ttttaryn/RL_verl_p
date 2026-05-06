@@ -1,0 +1,20 @@
+# Experiment 5: XML Format Training
+#
+# Trains model to use structured XML output format:
+# <reasoning>step by step reasoning</reasoning>
+# <answer>final answer</answer>
+
+defaults:
+  - ppo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_exp5_xml_format
+
+custom_reward_function:
+  name: compute_score
+  reward_kwargs:
+    w_correctness: 0.6
+    w_format: 0.2
+    w_reasoning: 0.2
+    format_type: "xml"
+    correctness_method: "flexible"  # More flexible since answer in XML tags

@@ -1,0 +1,19 @@
+# Experiment 4: Balanced Weights
+#
+# Uses balanced weights across all reward components:
+# - correctness: 0.5
+# - format: 0.25
+# - reasoning: 0.25
+
+defaults:
+  - ppo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_exp4_balanced
+
+custom_reward_function:
+  name: compute_score_balanced
+  reward_kwargs:
+    w_correctness: 0.5
+    w_format: 0.25
+    w_reasoning: 0.25

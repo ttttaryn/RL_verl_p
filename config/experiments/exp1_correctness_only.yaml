@@ -1,0 +1,17 @@
+# Experiment 1: Baseline - Correctness Only
+#
+# This configuration uses only correctness reward (mimics original GSM8K training)
+# Use as baseline for comparison with multi-reward experiments.
+
+defaults:
+  - ppo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_exp1_correctness_only
+
+custom_reward_function:
+  name: compute_score_correctness_only
+  reward_kwargs:
+    w_correctness: 1.0
+    w_format: 0.0
+    w_reasoning: 0.0

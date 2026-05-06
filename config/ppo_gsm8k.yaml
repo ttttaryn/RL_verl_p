@@ -1,0 +1,108 @@
+# PPO Training Configuration for GSM8K with Multi-Reward System
+# 
+# This is the main configuration file for training. 
+# Use with: python -m verl.trainer.main_ppo --config-path=config --config-name=ppo_gsm8k
+#
+# Key features:
+# - Multi-reward system (correctness + format + reasoning)
+# - Configurable reward weights
+# - Support for structured output training
+# - Optimized for 8x A100 80GB GPUs
+
+# Inherit from verl's default PPO trainer config
+defaults:
+  - /verl/trainer/config/ppo_trainer
+
+# Data configuration
+data:
+  train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
+  val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
+  train_batch_size: 1024
+  max_prompt_length: 512
+  max_response_length: 512
+  filter_overlong_prompts: True
+  truncation: 'error'
+
+# Custom reward function configuration
+custom_reward_function:
+  # Path to your custom reward function file
+  path: ${oc.env:HOME}/verl_project/scripts/reward_fn.py
+  # Function name to use (choose from: compute_score, compute_score_correctness_only, 
+  # compute_score_with_reasoning, compute_score_balanced)
+  name: compute_score
+
+# Actor, Rollout, and Reference model configuration
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct
+    use_remove_padding: True
+  
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 8
+    use_kl_loss: False
+  
+  rollout:
+    name: vllm
+    log_prob_micro_batch_size_per_gpu: 16
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.5
+    temperature: 0.7
+    top_p: 0.95
+  
+  ref:
+    log_prob_micro_batch_size_per_gpu: 8
+
+# Critic model configuration
+critic:
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct
+  optim:
+    lr: 1e-5
+  ppo_micro_batch_size_per_gpu: 8
+
+# Algorithm configuration
+algorithm:
+  # GAE parameters
+  gamma: 1.0
+  lam: 0.95
+  adv_estimator: gae
+  
+  # KL penalty configuration
+  use_kl_in_reward: True
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.001
+    horizon: 10000
+    target_kl: 0.1
+
+# Trainer configuration
+trainer:
+  # Experiment tracking
+  project_name: verl_multi_reward
+  experiment_name: gsm8k_ppo_multi_reward
+  
+  # Logging - use both console and wandb for better tracking
+  logger: ["console", "wandb"]
+  
+  # Hardware configuration - optimized for 8x A100 80GB
+  n_gpus_per_node: 8
+  nnodes: 1
+  
+  # Training schedule
+  total_epochs: 15
+  
+  # Checkpointing
+  save_freq: 5
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  
+  # Validation
+  val_before_train: True
+  test_freq: 5
+  log_val_generations: 5  # Log some validation samples
+  
+  # Resume training
+  resume_mode: auto
