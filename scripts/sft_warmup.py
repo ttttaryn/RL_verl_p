@@ -132,7 +132,7 @@ def main():
         logging_steps=10,
         save_steps=args.save_steps,
         eval_steps=args.save_steps if val_dataset else None,
-        evaluation_strategy="steps" if val_dataset else "no",
+        eval_strategy="steps" if val_dataset else "no",
         save_total_limit=3,
         fp16=args.fp16,
         remove_unused_columns=False,
