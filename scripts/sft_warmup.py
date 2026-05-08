@@ -127,7 +127,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        warmup_ratio=0.1,
+        warmup_steps=100,
         lr_scheduler_type="cosine",
         logging_steps=10,
         save_steps=args.save_steps,
@@ -145,7 +145,7 @@ def main():
         args=training_args,
         train_dataset=tokenized,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=DataCollatorForSeq2Seq(
             tokenizer=tokenizer,
             model=model,
