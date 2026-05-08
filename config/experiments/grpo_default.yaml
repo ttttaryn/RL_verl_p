@@ -1,0 +1,21 @@
+# GRPO Experiment: Default Multi-Reward
+#
+# GRPO (Group Relative Policy Optimization) with multi-reward system.
+# Group size K=4, group-relative advantage, no critic model.
+#
+# Use with: python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
+
+defaults:
+  - grpo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_grpo_default
+
+algorithm:
+  group_size: 4
+  advantage:
+    method: group_relative
+    norm_method: standardize
+  clip_ratio: 0.2
+  kl_penalty:
+    kl_coef: 0.001

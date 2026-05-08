@@ -1,0 +1,90 @@
+# GRPO Training Configuration for GSM8K with Multi-Reward System
+#
+# GRPO (Group Relative Policy Optimization) — the algorithm behind DeepSeek-R1.
+# Key advantage over PPO: NO critic/value model needed (~50% VRAM savings),
+# uses group-relative advantage instead of GAE.
+#
+# Use with: python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
+
+defaults:
+  - /verl/trainer/config/ppo_trainer
+
+# ── Data ──────────────────────────────────────────────────────────────────
+data:
+  train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
+  val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
+  train_batch_size: 256         # Number of UNIQUE prompts per batch
+  max_prompt_length: 512
+  max_response_length: 512
+  filter_overlong_prompts: True
+  truncation: 'error'
+
+# ── Reward ────────────────────────────────────────────────────────────────
+custom_reward_function:
+  path: ${oc.env:HOME}/verl_project/scripts/reward_fn.py
+  name: compute_score
+
+# ── Model (shared Actor + Reference, NO Critic) ──────────────────────────
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct
+    use_remove_padding: True
+
+  actor:
+    optim:
+      lr: 1e-6
+    grpo_mini_batch_size: 64     # Mini-batch size for GRPO updates
+    grpo_micro_batch_size_per_gpu: 4
+
+  rollout:
+    name: vllm
+    log_prob_micro_batch_size_per_gpu: 8
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.5
+    temperature: 0.7
+    top_p: 0.95
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 8
+
+# ── GRPO-specific Algorithm Configuration ─────────────────────────────────
+# NOTE: No critic section — GRPO eliminates the critic entirely
+algorithm:
+  type: grpo
+
+  # Group sampling
+  group_size: 4                  # K responses sampled per prompt (typical: 4-16)
+
+  # Advantage computation
+  advantage:
+    method: group_relative       # "group_relative" or "global"
+    norm_method: standardize     # "standardize" (z-score) or "centered" (mean-subtract)
+
+  # Policy optimization
+  clip_ratio: 0.2               # ε for probability ratio clipping
+  loss_agg_mode: token-mean     # How to aggregate per-token losses
+
+  # KL penalty (baked into the GRPO objective, no separate controller)
+  kl_penalty:
+    type: fixed
+    kl_coef: 0.001                # β — weight of KL penalty in the loss
+    estimator: k1                 # "k1" (forward KL), "k2" (reverse KL), "k3" (symmetric)
+
+# ── Trainer ───────────────────────────────────────────────────────────────
+trainer:
+  project_name: verl_grpo
+  experiment_name: gsm8k_grpo_multi_reward
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 8
+  nnodes: 1
+  total_training_steps: 1000     # GRPO uses step-based scheduling (not epochs)
+
+  # Checkpointing
+  save_freq: 100
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Validation
+  val_before_train: True
+  test_freq: 100
+  log_val_generations: 5
+  resume_mode: auto

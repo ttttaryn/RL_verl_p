@@ -1,0 +1,24 @@
+# Experiment 6: Legacy Comparison (OLD behavior)
+#
+# Uses the ORIGINAL reward design for comparison with the fixed version:
+# - correctness_method: "strict" (requires #### format — coupled to format reward)
+# - answer_conditioned_reasoning: false (heuristic structure scoring, not gated on correctness)
+#
+# This config exists to quantify the impact of the v2 fixes.
+# Expected: higher format scores (from double-counting) but inflated reasoning scores
+# that don't correlate with actual math improvement.
+
+defaults:
+  - ppo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_exp6_legacy_comparison
+
+custom_reward_function:
+  name: compute_score_legacy_reasoning
+  reward_kwargs:
+    w_correctness: 0.7
+    w_format: 0.1
+    w_reasoning: 0.2
+    correctness_method: "strict"
+    answer_conditioned_reasoning: false
