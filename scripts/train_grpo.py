@@ -5,8 +5,7 @@ Usage:
     # Single GPU
     python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
 
-    # Multi-GPU (FSDP)
-    torchrun --nproc_per_node=8 scripts/train_grpo.py --config config/grpo_gsm8k.yaml
+    # This trainer is single-process/single-GPU. Use PPO/verl for multi-GPU.
 
 Key features:
   - No critic model needed (~50% VRAM savings vs PPO)
@@ -36,17 +35,32 @@ try:
 except ImportError:
     OmegaConf = None
 
-# Add project path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project and script paths. This lets the file work both as:
+#   python scripts/train_grpo.py
+# and:
+#   python -m scripts.train_grpo
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from verl_rewards import compute_composite_score
-from scripts.grpo_core import (
-    compute_group_relative_advantage,
-    compute_global_advantage,
-    compute_grpo_loss,
-    compute_kl_divergence,
-    collect_group_rollout_stats,
-)
+try:
+    from scripts.grpo_core import (
+        compute_group_relative_advantage,
+        compute_global_advantage,
+        compute_grpo_loss,
+        compute_kl_divergence,
+        collect_group_rollout_stats,
+    )
+except ModuleNotFoundError:
+    from grpo_core import (
+        compute_group_relative_advantage,
+        compute_global_advantage,
+        compute_grpo_loss,
+        compute_kl_divergence,
+        collect_group_rollout_stats,
+    )
 
 
 def load_config(config_path: str) -> dict:
