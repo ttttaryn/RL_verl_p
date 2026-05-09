@@ -13,7 +13,7 @@ defaults:
 data:
   train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
   val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
-  train_batch_size: 256         # Number of UNIQUE prompts per batch
+  train_batch_size: 8           # Number of UNIQUE prompts per GRPO step
   max_prompt_length: 512
   max_response_length: 512
   filter_overlong_prompts: True
@@ -42,6 +42,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 8
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.5
+    generation_batch_size: 8     # HF rollout generation micro-batch
     temperature: 0.7
     top_p: 0.95
 

@@ -166,10 +166,12 @@ class RolloutEngine:
                  top_p: float = 0.95, max_tokens: int = 512,
                  gpu_memory_utilization: float = 0.5,
                  tensor_parallel_size: int = 1,
-                 use_vllm: bool = False):
+                 use_vllm: bool = False,
+                 generation_batch_size: int = 8):
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+        self.generation_batch_size = generation_batch_size
         self._use_vllm = False
         self.llm = None
         self.model = None
@@ -210,33 +212,47 @@ class RolloutEngine:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("HF rollout model/tokenizer were not initialized")
 
-        was_training = self.model.training
-        self.model.eval()
-        responses = []
+        all_prompts = []
         for prompt in prompts:
             for _ in range(n_samples):
-                inputs = self.tokenizer(
-                    prompt, return_tensors="pt",
-                    truncation=True, max_length=512,
-                ).to(self.model.device)
+                all_prompts.append(prompt)
 
-                with torch.no_grad():
-                    output_ids = self.model.generate(
-                        input_ids=inputs.input_ids,
-                        attention_mask=inputs.attention_mask,
-                        max_new_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                    )
+        was_training = self.model.training
+        old_padding_side = self.tokenizer.padding_side
+        self.model.eval()
+        self.tokenizer.padding_side = "left"
+        responses = []
+        batch_size = max(1, self.generation_batch_size)
+        for start in range(0, len(all_prompts), batch_size):
+            batch_prompts = all_prompts[start:start + batch_size]
+            inputs = self.tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            ).to(self.model.device)
 
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            input_width = inputs.input_ids.shape[1]
+            for output in output_ids:
                 response = self.tokenizer.decode(
-                    output_ids[0][inputs.input_ids.shape[1]:],
+                    output[input_width:],
                     skip_special_tokens=True,
                 )
                 responses.append(response)
 
+        self.tokenizer.padding_side = old_padding_side
         if was_training:
             self.model.train()
         return responses
@@ -276,6 +292,7 @@ class GRPOTrainer:
 
         # Training params
         self.lr = self.model_config.get("actor", {}).get("optim", {}).get("lr", 1e-6)
+        self.train_batch_size = self.data_config.get("train_batch_size", 8)
         self.total_steps = self.trainer_config.get("total_training_steps", 1000)
         self.save_freq = self.trainer_config.get("save_freq", 100)
         self.test_freq = self.trainer_config.get("test_freq", 100)
@@ -352,6 +369,7 @@ class GRPOTrainer:
             gpu_memory_utilization=self.model_config.get("rollout", {}).get("gpu_memory_utilization", 0.5),
             tensor_parallel_size=self.model_config.get("rollout", {}).get("tensor_model_parallel_size", 1),
             use_vllm=rollout_use_vllm,
+            generation_batch_size=self.model_config.get("rollout", {}).get("generation_batch_size", 8),
         )
         if not self.rollout._use_vllm:
             self.rollout.set_hf_model(self.policy, self.tokenizer)
@@ -377,6 +395,7 @@ class GRPOTrainer:
 
         if self.is_main:
             print(f"  Train samples: {len(self.train_dataset)}")
+            print(f"  Train batch size: {self.train_batch_size} prompts")
             print(f"  Group size: K={self.group_size}")
             print(f"  Reward weights: {self.reward_weights}")
             print(f"  KL coef: β={self.kl_coef}")
@@ -598,7 +617,7 @@ class GRPOTrainer:
 
         dataloader = DataLoader(
             self.train_dataset,
-            batch_size=self.data_config.get("train_batch_size", 256),
+            batch_size=self.train_batch_size,
             shuffle=True,
         )
 
@@ -695,6 +714,8 @@ def main():
     parser.add_argument("--w-format", type=float, default=None)
     parser.add_argument("--w-reasoning", type=float, default=None)
     parser.add_argument("--group-size", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Number of unique prompts per GRPO step")
     parser.add_argument("--total-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--model", type=str, default=None)
@@ -714,6 +735,8 @@ def main():
             config["reward_weights"]["w_reasoning"] = args.w_reasoning
     if args.group_size is not None:
         config["algorithm"]["group_size"] = args.group_size
+    if args.batch_size is not None:
+        config["data"]["train_batch_size"] = args.batch_size
     if args.total_steps is not None:
         config["trainer"]["total_training_steps"] = args.total_steps
     if args.lr is not None:
