@@ -13,9 +13,9 @@ defaults:
 data:
   train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
   val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
-  train_batch_size: 8           # Number of UNIQUE prompts per GRPO step
+  train_batch_size: 2           # Number of UNIQUE prompts per GRPO step
   max_prompt_length: 512
-  max_response_length: 512
+  max_response_length: 256
   filter_overlong_prompts: True
   truncation: 'error'
 

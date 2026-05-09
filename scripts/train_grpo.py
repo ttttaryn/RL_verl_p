@@ -643,6 +643,7 @@ class GRPOTrainer:
             print(f"  {'Step':>6} {'Loss':>8} {'Reward':>8} {'Acc':>7} {'KL':>8} {'Clip%':>8}")
 
         step = 0
+        consecutive_oom = 0
         pbar = tqdm(total=self.total_steps, disable=not self.is_main)
 
         while step < self.total_steps:
@@ -660,9 +661,19 @@ class GRPOTrainer:
                         prompts, ground_truths, data_sources, prompt_ids,
                     )
                 except torch.cuda.OutOfMemoryError:
-                    print(f"  OOM at step {step}, skipping...")
+                    consecutive_oom += 1
+                    print(
+                        f"  OOM at step {step} (consecutive={consecutive_oom}). "
+                        "Try --batch-size 1 --group-size 2 --max-response-length 256."
+                    )
                     torch.cuda.empty_cache()
+                    if consecutive_oom >= 3:
+                        raise RuntimeError(
+                            "Repeated CUDA OOM before completing a GRPO step. "
+                            "Reduce --batch-size, --group-size, or --max-response-length."
+                        )
                     continue
+                consecutive_oom = 0
 
                 for k, v in stats.items():
                     history[k].append(v)
@@ -730,6 +741,7 @@ def main():
     parser.add_argument("--group-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Number of unique prompts per GRPO step")
+    parser.add_argument("--max-response-length", type=int, default=None)
     parser.add_argument("--total-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--model", type=str, default=None)
@@ -751,6 +763,8 @@ def main():
         config["algorithm"]["group_size"] = args.group_size
     if args.batch_size is not None:
         config["data"]["train_batch_size"] = args.batch_size
+    if args.max_response_length is not None:
+        config["data"]["max_response_length"] = args.max_response_length
     if args.total_steps is not None:
         config["trainer"]["total_training_steps"] = args.total_steps
     if args.lr is not None:

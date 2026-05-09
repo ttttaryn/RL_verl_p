@@ -16,7 +16,8 @@ set -e
 # ── Default settings ───────────────────────────────────────────────────
 N_GPUS=1
 GROUP_SIZE=4
-BATCH_SIZE=8
+BATCH_SIZE=2
+MAX_RESPONSE_LENGTH=256
 TOTAL_STEPS=1000
 CONFIG="config/grpo_gsm8k.yaml"
 MODEL="Qwen/Qwen2.5-0.5B-Instruct"
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --n-gpus)       N_GPUS="$2"; shift 2 ;;
     --group-size)   GROUP_SIZE="$2"; shift 2 ;;
     --batch-size)   BATCH_SIZE="$2"; shift 2 ;;
+    --max-response-length) MAX_RESPONSE_LENGTH="$2"; shift 2 ;;
     --total-steps)  TOTAL_STEPS="$2"; shift 2 ;;
     --config)       CONFIG="$2"; shift 2 ;;
     --model)        MODEL="$2"; shift 2 ;;
@@ -66,6 +68,7 @@ echo "  Model:        $MODEL"
 echo "  GPUs:         $N_GPUS"
 echo "  Group size:   K=$GROUP_SIZE"
 echo "  Batch size:   $BATCH_SIZE prompts/step"
+echo "  Max response: $MAX_RESPONSE_LENGTH tokens"
 echo "  Total steps:  $TOTAL_STEPS"
 echo "  Weights:      c=$W_CORRECTNESS f=$W_FORMAT r=$W_REASONING"
 echo "============================================"
@@ -84,6 +87,7 @@ GRPO_ARGS=(
   --config "$CONFIG"
   --group-size "$GROUP_SIZE"
   --batch-size "$BATCH_SIZE"
+  --max-response-length "$MAX_RESPONSE_LENGTH"
   --total-steps "$TOTAL_STEPS"
   --model "$MODEL"
   --w-correctness "$W_CORRECTNESS"
