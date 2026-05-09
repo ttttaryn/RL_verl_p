@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import torch
 from datasets import Dataset
 from transformers import (
@@ -42,10 +43,31 @@ def load_gsm8k_data(parquet_path: str) -> Dataset:
     df = pd.read_parquet(parquet_path)
     dataset = Dataset.from_pandas(df)
 
+    def extract_prompt(prompt_data) -> str:
+        if isinstance(prompt_data, np.ndarray):
+            prompt_data = prompt_data.tolist()
+        if isinstance(prompt_data, list):
+            for msg in prompt_data:
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    return str(msg.get("content", ""))
+            if prompt_data:
+                last_msg = prompt_data[-1]
+                if isinstance(last_msg, dict):
+                    return str(last_msg.get("content", last_msg))
+                return str(last_msg)
+            return ""
+        return str(prompt_data)
+
+    def extract_ground_truth(example) -> str:
+        reward_model = example.get("reward_model", {})
+        if isinstance(reward_model, dict) and reward_model.get("ground_truth") is not None:
+            return str(reward_model["ground_truth"])
+        return str(example.get("ground_truth", example.get("answer", "")))
+
     def format_sft_example(example):
         """Create a properly formatted SFT example with step-by-step reasoning."""
-        prompt = example.get("prompt", example.get("question", ""))
-        answer = str(example.get("ground_truth", example.get("answer", "")))
+        prompt = extract_prompt(example.get("prompt", example.get("question", "")))
+        answer = extract_ground_truth(example)
 
         # Build a demonstration with proper step-by-step structure
         # The prompt already includes "Let's think step by step and output
@@ -57,25 +79,31 @@ def load_gsm8k_data(parquet_path: str) -> Dataset:
         if solution and len(str(solution)) > 10:
             response = f" {solution}\n#### {answer}"
 
-        # Combine prompt + response for SFT
-        text = f"{prompt}{response}"
-
-        return {"text": text}
+        return {"prompt": prompt, "response": response}
 
     return dataset.map(format_sft_example)
 
 
 def tokenize_dataset(dataset: Dataset, tokenizer, max_length: int = 1024):
-    """Tokenize the dataset for causal LM training."""
+    """Tokenize the dataset and mask prompt tokens from the loss."""
 
     def tokenize(example):
+        prompt_ids = tokenizer(
+            example["prompt"],
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+        )["input_ids"]
         result = tokenizer(
-            example["text"],
+            example["prompt"] + example["response"],
             truncation=True,
             max_length=max_length,
             padding=False,
         )
-        result["labels"] = result["input_ids"].copy()
+        labels = result["input_ids"].copy()
+        prompt_len = min(len(prompt_ids), len(labels))
+        labels[:prompt_len] = [-100] * prompt_len
+        result["labels"] = labels
         return result
 
     return dataset.map(tokenize, remove_columns=dataset.column_names)

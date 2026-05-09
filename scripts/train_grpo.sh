@@ -6,16 +6,15 @@
 # on the same hardware.
 #
 # Usage:
-#   ./scripts/train_grpo.sh                          # default (8-GPU)
+#   ./scripts/train_grpo.sh                          # default (single GPU)
 #   ./scripts/train_grpo.sh --group-size 8            # larger groups
-#   ./scripts/train_grpo.sh --n-gpus 4                # 4 GPUs
 #   ./scripts/train_grpo.sh --n-gpus 1                # single GPU
 #   ./scripts/train_grpo.sh --model ./checkpoints/sft_warmup/final  # from SFT warmup
 
 set -e
 
 # ── Default settings ───────────────────────────────────────────────────
-N_GPUS=8
+N_GPUS=1
 GROUP_SIZE=4
 TOTAL_STEPS=1000
 CONFIG="config/grpo_gsm8k.yaml"
@@ -50,6 +49,12 @@ if [ ! -f "$CONFIG" ]; then
   exit 1
 fi
 
+if [ "$N_GPUS" -gt 1 ]; then
+  echo "Error: scripts/train_grpo.py is currently a single-process trainer."
+  echo "Use --n-gpus 1, or implement DDP/FSDP before launching with torchrun."
+  exit 1
+fi
+
 # ── Environment summary ────────────────────────────────────────────────
 echo "============================================"
 echo "  GRPO Training — GSM8K Multi-Reward"
@@ -66,7 +71,7 @@ echo ""
 # ── VRAM estimate ──────────────────────────────────────────────────────
 echo "VRAM comparison (Qwen2.5-0.5B, 8x A100 80GB):"
 echo "  PPO:   Actor(~2GB) + Critic(~2GB) + Ref(~2GB) + vLLM(~2GB) + Optim(~4GB) = ~12GB per GPU"
-echo "  GRPO:  Actor(~2GB) + Ref(~2GB) + vLLM(~2GB) + Optim(~4GB) = ~10GB per GPU"
+echo "  GRPO:  Actor(~2GB) + Ref(~2GB) + Optim(~4GB) = ~8GB per GPU"
 echo "  → GRPO saves ~2GB (17%) by removing the critic"
 echo "  → Savings increase with model size (50% for 7B models)"
 echo ""
@@ -82,14 +87,8 @@ GRPO_ARGS=(
   --w-reasoning "$W_REASONING"
 )
 
-if [ "$N_GPUS" -gt 1 ]; then
-  echo "Launching with torchrun ($N_GPUS GPUs)..."
-  torchrun --nproc_per_node="$N_GPUS" \
-    scripts/train_grpo.py "${GRPO_ARGS[@]}"
-else
-  echo "Launching on single GPU..."
-  python scripts/train_grpo.py "${GRPO_ARGS[@]}"
-fi
+echo "Launching on single GPU..."
+python scripts/train_grpo.py "${GRPO_ARGS[@]}"
 
 echo ""
 echo "Training complete!"

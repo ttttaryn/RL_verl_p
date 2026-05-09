@@ -13,6 +13,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from verl_rewards import compute_composite_score
 
 
+def _call_compute_score_with_overrides(overrides: dict, **kwargs) -> dict:
+    merged_kwargs = dict(kwargs)
+    merged_kwargs.update(overrides)
+    return compute_score(**merged_kwargs)
+
+
 def compute_score(
     data_source: str,
     solution_str: str,
@@ -75,14 +81,16 @@ def compute_score_correctness_only(
     **kwargs,
 ) -> dict:
     """Baseline: correctness reward only (no format, no reasoning)."""
-    return compute_score(
+    return _call_compute_score_with_overrides(
+        {
+            "w_correctness": 1.0,
+            "w_format": 0.0,
+            "w_reasoning": 0.0,
+        },
         data_source=data_source,
         solution_str=solution_str,
         ground_truth=ground_truth,
         extra_info=extra_info,
-        w_correctness=1.0,
-        w_format=0.0,
-        w_reasoning=0.0,
         **kwargs,
     )
 
@@ -95,14 +103,16 @@ def compute_score_with_reasoning(
     **kwargs,
 ) -> dict:
     """Heavy reasoning weight (0.6/0.1/0.3)."""
-    return compute_score(
+    return _call_compute_score_with_overrides(
+        {
+            "w_correctness": 0.6,
+            "w_format": 0.1,
+            "w_reasoning": 0.3,
+        },
         data_source=data_source,
         solution_str=solution_str,
         ground_truth=ground_truth,
         extra_info=extra_info,
-        w_correctness=0.6,
-        w_format=0.1,
-        w_reasoning=0.3,
         **kwargs,
     )
 
@@ -115,14 +125,16 @@ def compute_score_balanced(
     **kwargs,
 ) -> dict:
     """Balanced weights across all three components (0.5/0.25/0.25)."""
-    return compute_score(
+    return _call_compute_score_with_overrides(
+        {
+            "w_correctness": 0.5,
+            "w_format": 0.25,
+            "w_reasoning": 0.25,
+        },
         data_source=data_source,
         solution_str=solution_str,
         ground_truth=ground_truth,
         extra_info=extra_info,
-        w_correctness=0.5,
-        w_format=0.25,
-        w_reasoning=0.25,
         **kwargs,
     )
 
@@ -140,12 +152,14 @@ def compute_score_legacy_reasoning(
     based on output structure (length + step count), independent of
     whether the answer was correct. Only use for comparison experiments.
     """
-    return compute_score(
+    return _call_compute_score_with_overrides(
+        {
+            "answer_conditioned_reasoning": False,
+            "correctness_method": "strict",
+        },
         data_source=data_source,
         solution_str=solution_str,
         ground_truth=ground_truth,
         extra_info=extra_info,
-        answer_conditioned_reasoning=False,
-        correctness_method="strict",  # original strict mode
         **kwargs,
     )

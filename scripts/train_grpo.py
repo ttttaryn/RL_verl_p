@@ -28,10 +28,13 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    from omegaconf import OmegaConf
+except ImportError:
+    OmegaConf = None
 
 # Add project path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -46,7 +49,58 @@ from scripts.grpo_core import (
 )
 
 
+def load_config(config_path: str) -> dict:
+    """Load GRPO config and resolve OmegaConf-style interpolations."""
+    if OmegaConf is not None:
+        cfg = OmegaConf.load(config_path)
+        return OmegaConf.to_container(cfg, resolve=True)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        import yaml
+        config = yaml.safe_load(f)
+
+    # Minimal fallback for this repo's config if omegaconf is unavailable.
+    for key, value in config.get("data", {}).items():
+        if isinstance(value, str):
+            value = value.replace("${oc.env:HOME}", os.environ.get("HOME", ""))
+            config["data"][key] = os.path.expandvars(value)
+
+    trainer = config.get("trainer", {})
+    if isinstance(trainer.get("default_local_dir"), str):
+        trainer["default_local_dir"] = (
+            trainer["default_local_dir"]
+            .replace("${trainer.project_name}", str(trainer.get("project_name", "")))
+            .replace("${trainer.experiment_name}", str(trainer.get("experiment_name", "")))
+        )
+
+    return config
+
+
 # ── Dataset ───────────────────────────────────────────────────────────────
+
+def _extract_prompt(prompt_data) -> str:
+    """Extract a plain prompt string from common GSM8K parquet schemas."""
+    if isinstance(prompt_data, np.ndarray):
+        prompt_data = prompt_data.tolist()
+    if isinstance(prompt_data, list):
+        for msg in prompt_data:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                return str(msg.get("content", ""))
+        if prompt_data:
+            last_msg = prompt_data[-1]
+            if isinstance(last_msg, dict):
+                return str(last_msg.get("content", last_msg))
+            return str(last_msg)
+        return ""
+    return str(prompt_data)
+
+
+def _extract_ground_truth(row) -> str:
+    reward_model = row.get("reward_model", {})
+    if isinstance(reward_model, dict) and reward_model.get("ground_truth") is not None:
+        return str(reward_model["ground_truth"])
+    return str(row.get("ground_truth", row.get("answer", "")))
+
 
 class GSM8KDataset(Dataset):
     """GSM8K dataset for GRPO training.
@@ -61,8 +115,8 @@ class GSM8KDataset(Dataset):
         self.data_sources = []
 
         for _, row in df.iterrows():
-            prompt = row.get("prompt", row.get("question", ""))
-            answer = str(row.get("ground_truth", row.get("answer", "")))
+            prompt = _extract_prompt(row.get("prompt", row.get("question", "")))
+            answer = _extract_ground_truth(row)
 
             # Ensure prompt includes the GSM8K instruction
             if "####" not in prompt:
@@ -87,17 +141,27 @@ class GSM8KDataset(Dataset):
 # ── Rollout Engine (vLLM) ─────────────────────────────────────────────────
 
 class RolloutEngine:
-    """Generate responses using vLLM for fast batched inference."""
+    """Generate responses from the current policy.
+
+    The training path intentionally uses the live HF policy model instead of a
+    separate vLLM engine. A static vLLM instance would keep sampling from stale
+    initial weights unless explicit weight synchronization is implemented.
+    """
 
     def __init__(self, model_path: str, temperature: float = 0.7,
                  top_p: float = 0.95, max_tokens: int = 512,
                  gpu_memory_utilization: float = 0.5,
-                 tensor_parallel_size: int = 1):
+                 tensor_parallel_size: int = 1,
+                 use_vllm: bool = False):
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+        self._use_vllm = False
+        self.llm = None
+        self.model = None
+        self.tokenizer = None
 
-        try:
+        if use_vllm:
             from vllm import LLM, SamplingParams
             self.llm = LLM(
                 model=model_path,
@@ -112,14 +176,9 @@ class RolloutEngine:
             )
             self._use_vllm = True
             print(f"  vLLM engine initialized (tp={tensor_parallel_size})")
-        except ImportError:
-            print("  vLLM not available, using HuggingFace generate()")
-            self._use_vllm = False
-            self.model = None
-            self.tokenizer = None
 
     def set_hf_model(self, model, tokenizer):
-        """Set HF model for fallback generation."""
+        """Set the live HF policy model for rollout generation."""
         self.model = model
         self.tokenizer = tokenizer
 
@@ -134,7 +193,11 @@ class RolloutEngine:
             outputs = self.llm.generate(all_prompts, self.sampling_params)
             return [o.outputs[0].text for o in outputs]
 
-        # HuggingFace fallback
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("HF rollout model/tokenizer were not initialized")
+
+        was_training = self.model.training
+        self.model.eval()
         responses = []
         for prompt in prompts:
             for _ in range(n_samples):
@@ -159,6 +222,8 @@ class RolloutEngine:
                 )
                 responses.append(response)
 
+        if was_training:
+            self.model.train()
         return responses
 
 
@@ -205,6 +270,11 @@ class GRPOTrainer:
 
         # Device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+            raise NotImplementedError(
+                "scripts/train_grpo.py is a single-process trainer. "
+                "Use one process/GPU or implement DDP/FSDP before torchrun."
+            )
         # Note: full multi-GPU DDP requires torch.distributed.init_process_group()
         # For single-GPU or FSDP-managed multi-GPU, is_main is always True
         self.is_main = True
@@ -225,17 +295,19 @@ class GRPOTrainer:
         self.policy = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            device_map=None if torch.cuda.device_count() > 1 else "auto",
+            device_map=None,
         )
-        if torch.cuda.device_count() == 1:
+        if torch.cuda.is_available():
             self.policy = self.policy.to(self.device)
 
         # Reference model (frozen, for KL computation)
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
-            device_map="auto" if torch.cuda.device_count() <= 1 else None,
+            device_map=None,
         )
+        if torch.cuda.is_available():
+            self.ref_model = self.ref_model.to(self.device)
         for param in self.ref_model.parameters():
             param.requires_grad = False
         self.ref_model.eval()
@@ -253,15 +325,21 @@ class GRPOTrainer:
         rollout_top_p = self.model_config.get("rollout", {}).get("top_p", 0.95)
         max_response_len = self.data_config.get("max_response_length", 512)
 
+        rollout_use_vllm = self.model_config.get("rollout", {}).get("use_vllm", False)
+        if rollout_use_vllm and self.is_main:
+            print("  Warning: vLLM rollout is static unless weight sync is implemented.")
+
         self.rollout = RolloutEngine(
             model_path=model_path,
             temperature=rollout_temp,
             top_p=rollout_top_p,
             max_tokens=max_response_len,
             gpu_memory_utilization=self.model_config.get("rollout", {}).get("gpu_memory_utilization", 0.5),
+            tensor_parallel_size=self.model_config.get("rollout", {}).get("tensor_model_parallel_size", 1),
+            use_vllm=rollout_use_vllm,
         )
         if not self.rollout._use_vllm:
-            self.rollout.set_hf_model(self.ref_model, self.tokenizer)
+            self.rollout.set_hf_model(self.policy, self.tokenizer)
 
         # Dataset
         train_path = self.data_config.get("train_files", "")
@@ -308,9 +386,11 @@ class GRPOTrainer:
         return results
 
     def compute_log_probs(self, model, input_ids: torch.Tensor,
-                          attention_mask: torch.Tensor) -> torch.Tensor:
+                          attention_mask: torch.Tensor,
+                          requires_grad: bool = False) -> torch.Tensor:
         """Compute token-level log probabilities under a model."""
-        with torch.no_grad():
+        context = torch.enable_grad() if requires_grad else torch.no_grad()
+        with context:
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits  # [batch, seq_len, vocab]
 
@@ -328,6 +408,37 @@ class GRPOTrainer:
         # Pad to original length
         padded = F.pad(token_log_probs, (1, 0), value=0.0)  # [batch, seq_len]
         return padded
+
+    def build_policy_batch(self, prompts: List[str], responses: List[str]) -> Dict[str, torch.Tensor]:
+        """Tokenize prompt+response and return a mask covering response tokens only."""
+        full_texts = [prompt + response for prompt, response in zip(prompts, responses)]
+        encoded = self.tokenizer(
+            full_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.data_config.get("max_prompt_length", 512) + self.data_config.get("max_response_length", 512),
+            return_tensors="pt",
+        )
+        prompt_encoded = self.tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            max_length=self.data_config.get("max_prompt_length", 512),
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(self.device)
+        attention_mask = encoded["attention_mask"].to(self.device)
+        response_mask = attention_mask.clone()
+
+        prompt_lengths = prompt_encoded["attention_mask"].sum(dim=1).tolist()
+        for i, prompt_len in enumerate(prompt_lengths):
+            response_mask[i, :int(prompt_len)] = 0
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+        }
 
     def training_step(self, prompts: List[str], ground_truths: List[str],
                       data_sources: List[str], prompt_ids: List[int]) -> Dict[str, float]:
@@ -366,14 +477,11 @@ class GRPOTrainer:
         else:
             advantages = compute_global_advantage(reward_tensor)
 
-        # 4. Prepare training batch
-        encoded = self.tokenizer(
-            responses, padding=True, truncation=True,
-            max_length=self.data_config.get("max_response_length", 512),
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(self.device)
-        attention_mask = encoded["attention_mask"].to(self.device)
+        # 4. Prepare prompt-conditioned training batch.
+        batch_tensors = self.build_policy_batch(all_prompts, responses)
+        input_ids = batch_tensors["input_ids"]
+        attention_mask = batch_tensors["attention_mask"]
+        response_mask = batch_tensors["response_mask"]
 
         # 5. Compute reference model log probs (frozen, for KL penalty)
         with torch.no_grad():
@@ -384,17 +492,7 @@ class GRPOTrainer:
         #    The ratio r(θ) = π_new/π_old = 1.0 on the first epoch, so
         #    advantage clipping only matters when multi_epoch > 1.
         self.policy.train()
-        outputs = self.policy(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits
-
-        log_probs_all = F.log_softmax(logits, dim=-1)
-        shift_log_probs = log_probs_all[:, :-1, :]
-        shift_labels = input_ids[:, 1:]
-        log_probs = torch.gather(
-            shift_log_probs, dim=-1,
-            index=shift_labels.unsqueeze(-1),
-        ).squeeze(-1)
-        log_probs = F.pad(log_probs, (1, 0), value=0.0)
+        log_probs = self.compute_log_probs(self.policy, input_ids, attention_mask, requires_grad=True)
 
         # 7. Compute KL divergence (policy vs reference)
         kl = compute_kl_divergence(log_probs, ref_log_probs, estimator=self.kl_estimator)
@@ -407,7 +505,7 @@ class GRPOTrainer:
             kl_divergence=kl,
             clip_ratio=self.clip_ratio,
             kl_coef=self.kl_coef,
-            response_mask=attention_mask,
+            response_mask=response_mask,
         )
 
         # 9. Backward pass
@@ -587,9 +685,7 @@ def main():
     parser.add_argument("--model", type=str, default=None)
     args = parser.parse_args()
 
-    # Load config
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     # CLI overrides
     if args.w_correctness is not None or args.w_format is not None or args.w_reasoning is not None:

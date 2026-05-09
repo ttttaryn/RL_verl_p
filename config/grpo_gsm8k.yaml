@@ -37,7 +37,8 @@ actor_rollout_ref:
     grpo_micro_batch_size_per_gpu: 4
 
   rollout:
-    name: vllm
+    name: hf_policy
+    use_vllm: false              # Keep rollout tied to live policy weights
     log_prob_micro_batch_size_per_gpu: 8
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.5
@@ -68,7 +69,7 @@ algorithm:
   kl_penalty:
     type: fixed
     kl_coef: 0.001                # β — weight of KL penalty in the loss
-    estimator: k1                 # "k1" (forward KL), "k2" (reverse KL), "k3" (symmetric)
+    estimator: k3                 # "k3" non-negative approx, or sampled "k1"/"k2"
 
 # ── Trainer ───────────────────────────────────────────────────────────────
 trainer:

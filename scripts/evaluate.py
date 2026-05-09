@@ -24,6 +24,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from verl_rewards import compute_composite_score
 
 
+def resolve_torch_dtype(dtype: str):
+    if dtype == "auto":
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+            return torch.bfloat16
+        return torch.float16
+    if dtype == "bf16":
+        return torch.bfloat16
+    if dtype == "fp16":
+        return torch.float16
+    if dtype == "fp32":
+        return torch.float32
+    raise ValueError(f"Unknown dtype: {dtype}")
+
+
 def is_verl_checkpoint(model_path: str) -> bool:
     """Check if the path is a verl FSDP checkpoint directory."""
     path = Path(model_path)
@@ -42,7 +56,7 @@ def is_verl_checkpoint(model_path: str) -> bool:
     return False
 
 
-def load_verl_checkpoint(model_path: str, base_model_path: str = None) -> tuple:
+def load_verl_checkpoint(model_path: str, base_model_path: str = None, dtype: str = "auto") -> tuple:
     """Load model from verl FSDP checkpoint.
     
     Args:
@@ -86,7 +100,7 @@ def load_verl_checkpoint(model_path: str, base_model_path: str = None) -> tuple:
     # Load base model
     model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=resolve_torch_dtype(dtype),
         device_map="auto",
         trust_remote_code=True,
     )
@@ -321,6 +335,7 @@ def evaluate_model(
     max_new_tokens: int = 512,
     temperature: float = 0.7,
     base_model_path: Optional[str] = None,
+    dtype: str = "auto",
 ) -> Dict[str, Any]:
     """Evaluate a model on GSM8K test set.
     
@@ -343,13 +358,13 @@ def evaluate_model(
     # Check if this is a verl checkpoint
     if is_verl_checkpoint(model_path):
         print("Detected verl FSDP checkpoint format")
-        model, tokenizer = load_verl_checkpoint(model_path, base_model_path)
+        model, tokenizer = load_verl_checkpoint(model_path, base_model_path, dtype=dtype)
     else:
         # Standard HuggingFace model
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=resolve_torch_dtype(dtype),
             device_map="auto",
             trust_remote_code=True,
         )
@@ -504,6 +519,8 @@ def main():
                         help="Weight for reasoning reward")
     parser.add_argument("--base-model", type=str, default=None,
                         help="Base model path (for verl checkpoints)")
+    parser.add_argument("--dtype", choices=["auto", "fp16", "bf16", "fp32"], default="auto",
+                        help="Model dtype. auto uses bf16 on Ampere+ and fp16 on V100/older GPUs.")
     
     args = parser.parse_args()
     
@@ -526,6 +543,7 @@ def main():
         max_new_tokens=args.max_tokens,
         temperature=args.temperature,
         base_model_path=args.base_model,
+        dtype=args.dtype,
     )
 
 

@@ -181,8 +181,11 @@ def compute_kl_divergence(
         return log_probs - ref_log_probs
     elif estimator == "k2":
         return ref_log_probs - log_probs
+    elif estimator == "k3":
+        log_ratio = ref_log_probs - log_probs
+        return torch.exp(log_ratio) - log_ratio - 1.0
     else:
-        raise ValueError(f"Unknown KL estimator: {estimator}. Use 'k1' or 'k2'.")
+        raise ValueError(f"Unknown KL estimator: {estimator}. Use 'k1', 'k2', or 'k3'.")
 
 
 def collect_group_rollout_stats(
