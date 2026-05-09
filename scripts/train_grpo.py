@@ -222,7 +222,8 @@ class RolloutEngine:
 
                 with torch.no_grad():
                     output_ids = self.model.generate(
-                        inputs.input_ids,
+                        input_ids=inputs.input_ids,
+                        attention_mask=inputs.attention_mask,
                         max_new_tokens=self.max_tokens,
                         temperature=self.temperature,
                         top_p=self.top_p,
@@ -308,7 +309,7 @@ class GRPOTrainer:
         # Policy model (actor)
         self.policy = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             device_map=None,
         )
         if torch.cuda.is_available():
@@ -317,7 +318,7 @@ class GRPOTrainer:
         # Reference model (frozen, for KL computation)
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             device_map=None,
         )
         if torch.cuda.is_available():
