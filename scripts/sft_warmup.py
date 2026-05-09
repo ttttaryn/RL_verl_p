@@ -123,7 +123,10 @@ def main():
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--save-steps", type=int, default=500)
-    parser.add_argument("--fp16", action="store_true", default=True)
+    parser.add_argument("--fp16", action="store_true", default=True,
+                        help="Use Trainer AMP fp16. Model weights are still loaded in fp32.")
+    parser.add_argument("--no-fp16", action="store_false", dest="fp16",
+                        help="Disable Trainer AMP fp16.")
     args = parser.parse_args()
 
     print(f"Loading model: {args.model}")
@@ -133,7 +136,10 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.float16 if args.fp16 else torch.float32,
+        # Keep trainable weights in fp32 and let Trainer AMP handle fp16 autocast.
+        # Loading trainable parameters directly as fp16 makes Accelerate's GradScaler
+        # fail with: ValueError("Attempting to unscale FP16 gradients.").
+        dtype=torch.float32,
         device_map="auto",
     )
 
@@ -196,6 +202,7 @@ def main():
         "train_data": args.train_data,
         "epochs": args.epochs,
         "learning_rate": args.lr,
+        "fp16_amp": args.fp16,
         "description": "SFT warmup baseline for GSM8K multi-reward RL training",
     }
     with open(os.path.join(final_path, "sft_metadata.json"), "w") as f:
