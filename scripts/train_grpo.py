@@ -326,7 +326,10 @@ class GRPOTrainer:
         # Policy model (actor)
         self.policy = AutoModelForCausalLM.from_pretrained(
             model_path,
-            dtype=torch.float16,
+            # Keep trainable policy weights in fp32 for optimizer stability.
+            # fp16 trainable weights can produce invalid sampling probabilities
+            # after a single GRPO update on small batches.
+            dtype=torch.float32,
             device_map=None,
         )
         if torch.cuda.is_available():
@@ -542,11 +545,22 @@ class GRPOTrainer:
             response_mask=response_mask,
         )
 
+        if not torch.isfinite(loss):
+            stats["skipped_step"] = 1.0
+            return stats
+
         # 9. Backward pass
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+        if not torch.isfinite(grad_norm):
+            self.optimizer.zero_grad(set_to_none=True)
+            stats["skipped_step"] = 1.0
+            stats["grad_norm"] = float("nan")
+            return stats
         self.optimizer.step()
+        stats["grad_norm"] = float(grad_norm.item())
+        stats["skipped_step"] = 0.0
 
         # 10. Collect step stats
         group_stats = collect_group_rollout_stats(

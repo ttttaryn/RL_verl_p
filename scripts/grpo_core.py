@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""GRPO (Group Relative Policy Optimization) — Core Algorithm Components.
+﻿#!/usr/bin/env python3
+"""GRPO (Group Relative Policy Optimization) 鈥?Core Algorithm Components.
 
 GRPO is the alignment algorithm behind DeepSeek-R1. It replaces PPO's
 critic-based GAE advantage with group-relative standardization, eliminating
@@ -15,12 +15,12 @@ Reference: DeepSeek-R1, "DeepSeekMath: Pushing the Limits of Mathematical
 Reasoning in Open Language Models" (2024)
 
 GRPO objective:
-  J(θ) = E[min(r_i * Â_i, clip(r_i, 1-ε, 1+ε) * Â_i) - β * D_KL(π||π_ref)]
+  J(胃) = E[min(r_i * 脗_i, clip(r_i, 1-蔚, 1+蔚) * 脗_i) - 尾 * D_KL(蟺||蟺_ref)]
 
 Where:
-  r_i = π_θ(a_i|s) / π_old(a_i|s)   (probability ratio)
-  Â_i = (R_i - μ_group) / σ_group     (group-relative advantage)
-  β   = KL penalty coefficient
+  r_i = 蟺_胃(a_i|s) / 蟺_old(a_i|s)   (probability ratio)
+  脗_i = (R_i - 渭_group) / 蟽_group     (group-relative advantage)
+  尾   = KL penalty coefficient
 """
 
 import torch
@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 
-# ── Group-Relative Advantage ──────────────────────────────────────────────
+# 鈹€鈹€ Group-Relative Advantage 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 def compute_group_relative_advantage(
     rewards: torch.Tensor,
@@ -57,7 +57,7 @@ def compute_group_relative_advantage(
         group_rewards = rewards[mask]
 
         if len(group_rewards) < 2:
-            # Single response in group — no relative signal
+            # Single response in group 鈥?no relative signal
             advantages[mask] = 0.0
             continue
 
@@ -88,7 +88,7 @@ def compute_global_advantage(
     return (rewards - mean) / (std + eps)
 
 
-# ── GRPO Loss ─────────────────────────────────────────────────────────────
+# 鈹€鈹€ GRPO Loss 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 def compute_grpo_loss(
     log_probs: torch.Tensor,
@@ -97,74 +97,57 @@ def compute_grpo_loss(
     kl_divergence: torch.Tensor,
     clip_ratio: float = 0.2,
     kl_coef: float = 0.001,
-    loss_agg_mode: str = "token-mean",
+    loss_agg_mode: str = "seq-mean",
     response_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Compute the GRPO policy loss.
+    """Compute sequence-level GRPO loss.
 
-    Args:
-        log_probs: [batch, seq_len] current policy log probs
-        old_log_probs: [batch, seq_len] old policy log probs (from rollout)
-        advantages: [batch, 1] or [batch] group-relative advantages
-        kl_divergence: [batch, seq_len] per-token KL from reference model
-        clip_ratio: ε for probability ratio clipping
-        kl_coef: β weight for KL penalty
-        loss_agg_mode: how to aggregate across tokens/sequences
-        response_mask: [batch, seq_len] 1 for response tokens, 0 for padding
-
-    Returns:
-        loss: scalar GRPO loss
-        stats: dict with diagnostic values
+    GRPO assigns one scalar reward/advantage to each sampled completion, so the
+    policy objective should operate at sequence level. We first sum log-probs
+    over response tokens, then apply the group-relative advantage once per
+    completion. This avoids amplifying the advantage by response length.
     """
-    # Probability ratio: π_θ / π_old
-    log_ratio = log_probs - old_log_probs
-    ratio = torch.exp(log_ratio)  # r_i(θ)
+    if response_mask is None:
+        response_mask = torch.ones_like(log_probs)
 
-    # Ensure advantages broadcast correctly
-    if advantages.dim() == 1:
-        advantages = advantages.unsqueeze(-1)  # [batch, 1]
+    response_mask = response_mask.to(log_probs.dtype)
+    token_count = response_mask.sum(dim=-1).clamp(min=1.0)
 
-    # Clipped surrogate objective
-    surr1 = ratio * advantages
-    surr2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * advantages
-    policy_loss = -torch.min(surr1, surr2)  # negative because we minimize
+    seq_log_probs = (log_probs * response_mask).sum(dim=-1)
+    seq_old_log_probs = (old_log_probs * response_mask).sum(dim=-1)
+    seq_log_ratio = torch.clamp(seq_log_probs - seq_old_log_probs, min=-20.0, max=20.0)
+    seq_ratio = torch.exp(seq_log_ratio)
 
-    # KL penalty (added to the loss — GRPO bakes KL into the objective)
-    kl_loss = kl_coef * kl_divergence
+    if advantages.dim() > 1:
+        advantages = advantages.squeeze(-1)
+    advantages = torch.nan_to_num(advantages, nan=0.0, posinf=5.0, neginf=-5.0).clamp(-5.0, 5.0)
 
-    # Per-token loss
-    per_token_loss = policy_loss + kl_loss
+    surr1 = seq_ratio * advantages
+    surr2 = torch.clamp(seq_ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * advantages
+    policy_loss = -torch.min(surr1, surr2).mean()
 
-    # Aggregate loss
-    if response_mask is not None:
-        if loss_agg_mode == "token-mean":
-            loss = (per_token_loss * response_mask).sum() / response_mask.sum().clamp(min=1)
-        elif loss_agg_mode == "token-sum":
-            loss = (per_token_loss * response_mask).sum()
-        elif loss_agg_mode == "seq-mean":
-            seq_loss = (per_token_loss * response_mask).sum(dim=-1)
-            loss = seq_loss.mean()
-        else:
-            raise ValueError(f"Unknown loss_agg_mode: {loss_agg_mode}")
-    else:
-        loss = per_token_loss.mean()
+    token_kl = torch.nan_to_num(kl_divergence, nan=0.0, posinf=1e4, neginf=-1e4)
+    seq_kl = (token_kl * response_mask).sum(dim=-1) / token_count
+    kl_loss = kl_coef * seq_kl.mean()
 
-    # Diagnostic statistics
+    loss = policy_loss + kl_loss
+
     with torch.no_grad():
         stats = {
             "loss": loss.item(),
-            "policy_loss": policy_loss.mean().item(),
-            "kl_loss": kl_loss.mean().item(),
-            "ratio_mean": ratio.mean().item(),
-            "ratio_std": ratio.std().item(),
-            "ratio_clip_frac": ((ratio < 1.0 - clip_ratio) | (ratio > 1.0 + clip_ratio)).float().mean().item(),
-            "approx_kl": (0.5 * (log_ratio ** 2)).mean().item(),
+            "policy_loss": policy_loss.item(),
+            "kl_loss": kl_loss.item(),
+            "ratio_mean": seq_ratio.mean().item(),
+            "ratio_std": seq_ratio.std().item(),
+            "ratio_clip_frac": ((seq_ratio < 1.0 - clip_ratio) | (seq_ratio > 1.0 + clip_ratio)).float().mean().item(),
+            "approx_kl": (0.5 * (seq_log_ratio ** 2)).mean().item(),
+            "seq_kl": seq_kl.mean().item(),
         }
 
     return loss, stats
 
 
-# ── KL Divergence ─────────────────────────────────────────────────────────
+# 鈹€鈹€ KL Divergence 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 def compute_kl_divergence(
     log_probs: torch.Tensor,
@@ -174,8 +157,8 @@ def compute_kl_divergence(
     """Compute per-token KL divergence between policy and reference.
 
     Estimators:
-      k1: KL(π||π_ref) ≈ log π - log π_ref  (forward KL, recommended)
-      k2: KL(π_ref||π) ≈ log π_ref - log π  (reverse KL)
+      k1: KL(蟺||蟺_ref) 鈮?log 蟺 - log 蟺_ref  (forward KL, recommended)
+      k2: KL(蟺_ref||蟺) 鈮?log 蟺_ref - log 蟺  (reverse KL)
     """
     if estimator == "k1":
         return log_probs - ref_log_probs

@@ -32,7 +32,7 @@ actor_rollout_ref:
 
   actor:
     optim:
-      lr: 1e-6
+      lr: 1e-7
     grpo_mini_batch_size: 64     # Mini-batch size for GRPO updates
     grpo_micro_batch_size_per_gpu: 4
 
