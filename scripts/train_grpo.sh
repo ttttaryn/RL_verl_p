@@ -6,16 +6,18 @@
 #
 # Usage:
 #   ./scripts/train_grpo.sh
-#   ./scripts/train_grpo.sh --group-size 4 --batch-size 4
+#   ./scripts/train_grpo.sh --group-size 2 --batch-size 1 --max-response-length 128
 #   ./scripts/train_grpo.sh --n-gpus 1
 #   ./scripts/train_grpo.sh --model ./checkpoints/sft_warmup/final
 
 set -e
 
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 N_GPUS=1
-GROUP_SIZE=4
-BATCH_SIZE=4
-MAX_RESPONSE_LENGTH=384
+GROUP_SIZE=2
+BATCH_SIZE=1
+MAX_RESPONSE_LENGTH=128
 TOTAL_STEPS=1000
 CONFIG="config/grpo_gsm8k.yaml"
 MODEL="Qwen/Qwen2.5-0.5B-Instruct"

@@ -292,7 +292,7 @@ class GRPOTrainer:
 
         # Training params
         self.lr = self.model_config.get("actor", {}).get("optim", {}).get("lr", 1e-6)
-        self.train_batch_size = self.data_config.get("train_batch_size", 8)
+        self.train_batch_size = self.data_config.get("train_batch_size", 2)
         self.total_steps = self.trainer_config.get("total_training_steps", 1000)
         self.save_freq = self.trainer_config.get("save_freq", 100)
         self.test_freq = self.trainer_config.get("test_freq", 100)
@@ -372,7 +372,7 @@ class GRPOTrainer:
             gpu_memory_utilization=self.model_config.get("rollout", {}).get("gpu_memory_utilization", 0.5),
             tensor_parallel_size=self.model_config.get("rollout", {}).get("tensor_model_parallel_size", 1),
             use_vllm=rollout_use_vllm,
-            generation_batch_size=self.model_config.get("rollout", {}).get("generation_batch_size", 8),
+            generation_batch_size=self.model_config.get("rollout", {}).get("generation_batch_size", 2),
         )
         if not self.rollout._use_vllm:
             self.rollout.set_hf_model(self.policy, self.tokenizer)
@@ -400,6 +400,7 @@ class GRPOTrainer:
             print(f"  Train samples: {len(self.train_dataset)}")
             print(f"  Train batch size: {self.train_batch_size} prompts")
             print(f"  Group size: K={self.group_size}")
+            print(f"  Max response len: {self.data_config.get('max_response_length', 256)} tokens")
             print(f"  Reward weights: {self.reward_weights}")
             print(f"  KL coef: β={self.kl_coef}")
             print(f"  Learning rate: {self.lr}")
@@ -664,7 +665,7 @@ class GRPOTrainer:
                     consecutive_oom += 1
                     print(
                         f"  OOM at step {step} (consecutive={consecutive_oom}). "
-                        "Try --batch-size 1 --group-size 2 --max-response-length 256."
+                        "Try --batch-size 1 --group-size 2 --max-response-length 128."
                     )
                     torch.cuda.empty_cache()
                     if consecutive_oom >= 3:

@@ -13,9 +13,9 @@ defaults:
 data:
   train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
   val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
-  train_batch_size: 4           # Number of UNIQUE prompts per GRPO step
+  train_batch_size: 2           # Number of UNIQUE prompts per GRPO step
   max_prompt_length: 512
-  max_response_length: 384
+  max_response_length: 256
   filter_overlong_prompts: True
   truncation: 'error'
 
@@ -33,21 +33,21 @@ actor_rollout_ref:
   actor:
     optim:
       lr: 1e-7
-    grpo_mini_batch_size: 64     # Mini-batch size for GRPO updates
-    grpo_micro_batch_size_per_gpu: 4
+    grpo_mini_batch_size: 32     # Mini-batch size for GRPO updates
+    grpo_micro_batch_size_per_gpu: 2
 
   rollout:
     name: hf_policy
     use_vllm: false              # Keep rollout tied to live policy weights
-    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_micro_batch_size_per_gpu: 4
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.5
-    generation_batch_size: 8     # HF rollout generation micro-batch
+    gpu_memory_utilization: 0.4
+    generation_batch_size: 2     # HF rollout generation micro-batch
     temperature: 0.7
     top_p: 0.95
 
   ref:
-    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_micro_batch_size_per_gpu: 4
 
 # ── GRPO-specific Algorithm Configuration ─────────────────────────────────
 # NOTE: No critic section — GRPO eliminates the critic entirely
