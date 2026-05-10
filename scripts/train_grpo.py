@@ -616,14 +616,13 @@ class GRPOTrainer:
                 batch["prompt"], responses,
                 batch["ground_truth"], batch["data_source"],
             ):
-                result = compute_composite_score(
+                reward_fn = compute_score_legacy_reasoning if self.warmup_use_legacy_reward else compute_score
+                result = reward_fn(
                     data_source=ds,
                     solution_str=response,
                     ground_truth=gt,
                     extra_info=None,
-                    w_correctness=self.reward_weights["correctness"],
-                    w_format=self.reward_weights["format"],
-                    w_reasoning=self.reward_weights["reasoning"],
+                    **self.reward_kwargs,
                 )
                 all_rewards.append(result["score"])
                 all_correct.append(result["is_correct"])
