@@ -1,23 +1,21 @@
 #!/bin/bash
 # GRPO Training Launcher for GSM8K Multi-Reward
 #
-# GRPO eliminates the critic model, saving ~50% VRAM vs PPO.
-# This means you can train larger models or use larger batch sizes
-# on the same hardware.
+# GRPO removes the critic model and is useful for quick reward/training validation.
+# The current trainer is intentionally single-process; use PPO/verl for 4-GPU runs.
 #
 # Usage:
-#   ./scripts/train_grpo.sh                          # default (single GPU)
-#   ./scripts/train_grpo.sh --group-size 8            # larger groups
-#   ./scripts/train_grpo.sh --n-gpus 1                # single GPU
-#   ./scripts/train_grpo.sh --model ./checkpoints/sft_warmup/final  # from SFT warmup
+#   ./scripts/train_grpo.sh
+#   ./scripts/train_grpo.sh --group-size 4 --batch-size 4
+#   ./scripts/train_grpo.sh --n-gpus 1
+#   ./scripts/train_grpo.sh --model ./checkpoints/sft_warmup/final
 
 set -e
 
-# ── Default settings ───────────────────────────────────────────────────
 N_GPUS=1
 GROUP_SIZE=4
-BATCH_SIZE=2
-MAX_RESPONSE_LENGTH=256
+BATCH_SIZE=4
+MAX_RESPONSE_LENGTH=384
 TOTAL_STEPS=1000
 CONFIG="config/grpo_gsm8k.yaml"
 MODEL="Qwen/Qwen2.5-0.5B-Instruct"
@@ -25,7 +23,6 @@ W_CORRECTNESS=0.7
 W_FORMAT=0.1
 W_REASONING=0.2
 
-# ── Parse CLI args ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
     --n-gpus)       N_GPUS="$2"; shift 2 ;;
@@ -40,14 +37,14 @@ while [[ $# -gt 0 ]]; do
     --w-reasoning)  W_REASONING="$2"; shift 2 ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--n-gpus N] [--group-size K] [--total-steps N] [--model PATH]"
+      echo "Usage: $0 [--n-gpus N] [--group-size K] [--batch-size N] [--max-response-length N]"
+      echo "          [--total-steps N] [--model PATH]"
       echo "          [--w-correctness F] [--w-format F] [--w-reasoning F]"
       exit 1
       ;;
   esac
 done
 
-# ── Validate ───────────────────────────────────────────────────────────
 if [ ! -f "$CONFIG" ]; then
   echo "Error: Config file not found: $CONFIG"
   exit 1
@@ -59,9 +56,8 @@ if [ "$N_GPUS" -gt 1 ]; then
   exit 1
 fi
 
-# ── Environment summary ────────────────────────────────────────────────
 echo "============================================"
-echo "  GRPO Training — GSM8K Multi-Reward"
+echo "  GRPO Training - GSM8K Multi-Reward"
 echo "============================================"
 echo "  Config:       $CONFIG"
 echo "  Model:        $MODEL"
@@ -74,15 +70,13 @@ echo "  Weights:      c=$W_CORRECTNESS f=$W_FORMAT r=$W_REASONING"
 echo "============================================"
 echo ""
 
-# ── VRAM estimate ──────────────────────────────────────────────────────
-echo "VRAM comparison (Qwen2.5-0.5B, 8x A100 80GB):"
+echo "VRAM comparison (Qwen2.5-0.5B, per A100 GPU):"
 echo "  PPO:   Actor(~2GB) + Critic(~2GB) + Ref(~2GB) + vLLM(~2GB) + Optim(~4GB) = ~12GB per GPU"
 echo "  GRPO:  Actor(~2GB) + Ref(~2GB) + Optim(~4GB) = ~8GB per GPU"
-echo "  → GRPO saves ~2GB (17%) by removing the critic"
-echo "  → Savings increase with model size (50% for 7B models)"
+echo "  GRPO saves ~2GB (17%) by removing the critic"
+echo "  Savings increase with model size (50% for 7B models)"
 echo ""
 
-# ── Launch ──────────────────────────────────────────────────────────────
 GRPO_ARGS=(
   --config "$CONFIG"
   --group-size "$GROUP_SIZE"

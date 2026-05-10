@@ -3,7 +3,7 @@
 # 批量运行对照实验脚本 (Ablation Study)
 # ==============================================================================
 #
-# 该脚本用于在 8x A100 80GB 配置下运行多组奖励权重对照实验
+# 该脚本用于在 A100 多卡配置下运行多组奖励权重对照实验，默认入口为 4x A100
 # 每组实验使用不同的 (correctness, format, reasoning) 权重组合
 #
 # Usage:
@@ -134,7 +134,7 @@ if [[ "$DRY_RUN" == true ]]; then
         if [[ $idx -ge 0 && $idx -lt ${#EXPERIMENTS[@]} ]]; then
             IFS='|' read -r name w_c w_f w_r desc <<< "${EXPERIMENTS[$idx]}"
             echo -e "${GREEN}实验 $exp_num ($name):${NC}"
-            echo "  ./scripts/train_8gpu.sh --w-correctness $w_c --w-format $w_f --w-reasoning $w_r $EXTRA_ARGS"
+            echo "  ./scripts/train_4gpu.sh --w-correctness $w_c --w-format $w_f --w-reasoning $w_r $EXTRA_ARGS"
             echo ""
         fi
     done
@@ -190,7 +190,7 @@ for exp_num in "${SELECTED_EXPS[@]}"; do
     } >> "$SUMMARY_LOG"
     
     # 运行实验
-    if ./scripts/train_8gpu.sh \
+    if ./scripts/train_4gpu.sh \
         --w-correctness "$w_c" \
         --w-format "$w_f" \
         --w-reasoning "$w_r" \

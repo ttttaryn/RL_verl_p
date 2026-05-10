@@ -7,7 +7,7 @@
 # - Multi-reward system (correctness + format + reasoning)
 # - Configurable reward weights
 # - Support for structured output training
-# - Optimized for 8x A100 80GB GPUs
+# - Optimized for 4x A100 40GB GPUs
 
 # Inherit from verl's default PPO trainer config
 defaults:
@@ -17,7 +17,7 @@ defaults:
 data:
   train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
   val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
-  train_batch_size: 1024
+  train_batch_size: 512
   max_prompt_length: 512
   max_response_length: 512
   filter_overlong_prompts: True
@@ -40,7 +40,7 @@ actor_rollout_ref:
   actor:
     optim:
       lr: 1e-6
-    ppo_mini_batch_size: 256
+    ppo_mini_batch_size: 128
     ppo_micro_batch_size_per_gpu: 8
     use_kl_loss: False
   
@@ -48,7 +48,7 @@ actor_rollout_ref:
     name: vllm
     log_prob_micro_batch_size_per_gpu: 16
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.5
+    gpu_memory_utilization: 0.55
     temperature: 0.7
     top_p: 0.95
   
@@ -88,8 +88,8 @@ trainer:
   # Logging - use both console and wandb for better tracking
   logger: ["console", "wandb"]
   
-  # Hardware configuration - optimized for 8x A100 80GB
-  n_gpus_per_node: 8
+  # Hardware configuration - optimized for 4x A100 40GB
+  n_gpus_per_node: 4
   nnodes: 1
   
   # Training schedule

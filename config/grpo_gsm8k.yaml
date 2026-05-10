@@ -13,9 +13,9 @@ defaults:
 data:
   train_files: ${oc.env:HOME}/data/gsm8k/train.parquet
   val_files: ${oc.env:HOME}/data/gsm8k/test.parquet
-  train_batch_size: 2           # Number of UNIQUE prompts per GRPO step
+  train_batch_size: 4           # Number of UNIQUE prompts per GRPO step
   max_prompt_length: 512
-  max_response_length: 256
+  max_response_length: 384
   filter_overlong_prompts: True
   truncation: 'error'
 
@@ -77,7 +77,7 @@ trainer:
   project_name: verl_grpo
   experiment_name: gsm8k_grpo_multi_reward
   logger: ["console", "wandb"]
-  n_gpus_per_node: 8
+  n_gpus_per_node: 1             # GRPO trainer is currently single-process
   nnodes: 1
   total_training_steps: 1000     # GRPO uses step-based scheduling (not epochs)
 

@@ -13,13 +13,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Default values
 MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
-TRAIN_BATCH_SIZE=1024
+TRAIN_BATCH_SIZE=512
 MAX_PROMPT_LENGTH=512
 MAX_RESPONSE_LENGTH=512
 LR_ACTOR=1e-6
 LR_CRITIC=1e-5
 KL_COEF=0.001
-N_GPUS=8
+N_GPUS=4
 TOTAL_EPOCHS=15
 SAVE_FREQ=5
 TEST_FREQ=5
@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --model PATH           Model path (default: Qwen/Qwen2.5-0.5B-Instruct)"
-            echo "  --batch-size SIZE      Training batch size (default: 256)"
-            echo "  --gpus NUM             Number of GPUs (default: 1)"
+            echo "  --batch-size SIZE      Training batch size (default: 512)"
+            echo "  --gpus NUM             Number of GPUs (default: 4)"
             echo "  --epochs NUM           Number of epochs (default: 15)"
             echo "  --w-correctness WEIGHT Weight for correctness reward (default: 0.7)"
             echo "  --w-format WEIGHT      Weight for format reward (default: 0.1)"
@@ -132,12 +132,12 @@ python3 -m verl.trainer.main_ppo \
     +custom_reward_function.reward_kwargs.w_reasoning=$W_REASONING \
     actor_rollout_ref.model.path="$MODEL_PATH" \
     actor_rollout_ref.actor.optim.lr=$LR_ACTOR \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     critic.optim.lr=$LR_CRITIC \
     critic.model.path="$MODEL_PATH" \
