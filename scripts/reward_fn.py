@@ -61,6 +61,7 @@ def compute_score(
         w_reasoning=w_reasoning,
         correctness_method=correctness_method,
         format_type=format_type,
+        continuous_format_reward=bool(kwargs.get("continuous_format_reward", False)),
         answer_conditioned_reasoning=answer_conditioned,
         min_reasoning_length=min_reasoning_length,
         optimal_reasoning_length=optimal_reasoning_length,

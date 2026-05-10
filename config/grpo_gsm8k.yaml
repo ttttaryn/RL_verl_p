@@ -6,8 +6,7 @@
 #
 # Use with: python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
 
-defaults:
-  - /verl/trainer/config/ppo_trainer
+warmup_use_legacy_reward: true
 
 # ── Data ──────────────────────────────────────────────────────────────────
 data:
@@ -23,6 +22,13 @@ data:
 custom_reward_function:
   path: ${oc.env:HOME}/verl_project/scripts/reward_fn.py
   name: compute_score
+  reward_kwargs:
+    w_correctness: 0.7
+    w_format: 0.1
+    w_reasoning: 0.2
+    correctness_method: "flexible"
+    answer_conditioned_reasoning: false
+    continuous_format_reward: true
 
 # ── Model (shared Actor + Reference, NO Critic) ──────────────────────────
 actor_rollout_ref:
@@ -32,9 +38,9 @@ actor_rollout_ref:
 
   actor:
     optim:
-      lr: 1e-7
-    grpo_mini_batch_size: 32     # Mini-batch size for GRPO updates
-    grpo_micro_batch_size_per_gpu: 2
+      lr: 1e-6
+    grpo_mini_batch_size: 16     # Mini-batch size for GRPO updates
+    grpo_micro_batch_size_per_gpu: 1
 
   rollout:
     name: hf_policy
@@ -42,7 +48,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 4
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.4
-    generation_batch_size: 2     # HF rollout generation micro-batch
+    generation_batch_size: 1     # HF rollout generation micro-batch
     temperature: 0.7
     top_p: 0.95
 
@@ -70,7 +76,7 @@ algorithm:
   kl_penalty:
     type: fixed
     kl_coef: 0.001                # β — weight of KL penalty in the loss
-    estimator: k3                 # "k3" non-negative approx, or sampled "k1"/"k2"
+    estimator: k1                 # forward KL estimate for logging stability
 
 # ── Trainer ───────────────────────────────────────────────────────────────
 trainer:

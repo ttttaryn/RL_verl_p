@@ -119,6 +119,7 @@ def compute_format_reward(
     full_format_score: float = 1.0,
     partial_format_score: float = 0.5,
     no_format_score: float = 0.0,
+    continuous: bool = False,
 ) -> dict:
     """Compute the format reward for a solution.
 
@@ -132,6 +133,8 @@ def compute_format_reward(
         full_format_score: Score for excellent structure
         partial_format_score: Score for partial structure
         no_format_score: Score for unstructured output
+        continuous: When true, return the raw GSM8K structure score instead of
+            mapping it into coarse 0/0.5/1 tiers.
     """
     if format_type == "xml":
         format_check = check_xml_structure(solution_str)
@@ -153,8 +156,9 @@ def compute_format_reward(
         structure = check_gsm8k_structure(solution_str)
         struct_score = structure["structure_score"]
 
-        # Map continuous structure score to discrete reward tiers
-        if struct_score >= 0.8:
+        if continuous:
+            score = struct_score
+        elif struct_score >= 0.8:
             score = full_format_score
         elif struct_score >= 0.4:
             score = partial_format_score

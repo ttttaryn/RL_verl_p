@@ -57,6 +57,7 @@ class CompositeReward:
             "full_format_score": 1.0,
             "partial_format_score": 0.5,
             "no_format_score": 0.0,
+            "continuous": False,
         }
 
         self.reasoning_config = reasoning_config or {
@@ -176,6 +177,7 @@ def compute_composite_score(
     correctness_method: str = "flexible",
     # Format config
     format_type: str = "gsm8k",
+    continuous_format_reward: bool = False,
     # Reasoning config
     answer_conditioned_reasoning: bool = True,
     min_reasoning_length: int = 50,
@@ -210,6 +212,7 @@ def compute_composite_score(
             "full_format_score": 1.0,
             "partial_format_score": 0.5,
             "no_format_score": 0.0,
+            "continuous": continuous_format_reward,
         },
         reasoning_config={
             "length_weight": 0.4,

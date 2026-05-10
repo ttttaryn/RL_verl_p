@@ -44,7 +44,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from verl_rewards import compute_composite_score
+try:
+    from scripts.reward_fn import compute_score, compute_score_legacy_reasoning
+except ModuleNotFoundError:
+    from reward_fn import compute_score, compute_score_legacy_reasoning
+
 try:
     from scripts.grpo_core import (
         compute_group_relative_advantage,
@@ -395,14 +399,22 @@ class GRPOTrainer:
             "format": float(self.config.get("reward_weights", {}).get("w_format", 0.1)),
             "reasoning": float(self.config.get("reward_weights", {}).get("w_reasoning", 0.2)),
         }
+        reward_cfg = self.config.get("custom_reward_function", {}).get("reward_kwargs", {})
+        self.reward_kwargs = dict(reward_cfg)
+        self.reward_kwargs.setdefault("w_correctness", self.reward_weights["correctness"])
+        self.reward_kwargs.setdefault("w_format", self.reward_weights["format"])
+        self.reward_kwargs.setdefault("w_reasoning", self.reward_weights["reasoning"])
+        self.reward_kwargs.setdefault("correctness_method", "flexible")
+        self.reward_kwargs.setdefault("answer_conditioned_reasoning", False)
+        self.warmup_use_legacy_reward = bool(self.config.get("warmup_use_legacy_reward", True))
 
         if self.is_main:
             print(f"  Train samples: {len(self.train_dataset)}")
             print(f"  Train batch size: {self.train_batch_size} prompts")
             print(f"  Group size: K={self.group_size}")
             print(f"  Max response len: {self.data_config.get('max_response_length', 256)} tokens")
+            print(f"  Reward mode: {'legacy warmup' if self.warmup_use_legacy_reward else 'answer-conditioned'}")
             print(f"  Reward weights: {self.reward_weights}")
-            print(f"  KL coef: β={self.kl_coef}")
             print(f"  Learning rate: {self.lr}")
             print(f"  Total steps: {self.total_steps}")
 
@@ -411,14 +423,13 @@ class GRPOTrainer:
         """Compute multi-dimensional rewards for all responses."""
         results = []
         for prompt, response, gt, ds in zip(prompts, responses, ground_truths, data_sources):
-            result = compute_composite_score(
+            reward_fn = compute_score_legacy_reasoning if self.warmup_use_legacy_reward else compute_score
+            result = reward_fn(
                 data_source=ds,
                 solution_str=response,
                 ground_truth=gt,
                 extra_info=None,
-                w_correctness=self.reward_weights["correctness"],
-                w_format=self.reward_weights["format"],
-                w_reasoning=self.reward_weights["reasoning"],
+                **self.reward_kwargs,
             )
             results.append(result)
         return results
@@ -693,7 +704,7 @@ class GRPOTrainer:
                 if step % 10 == 0 and self.is_main:
                     print(
                         f"  {step:>6d} {stats['loss']:>8.4f} {stats['reward_mean']:>8.3f} "
-                        f"{stats['accuracy']:>7.2%} {stats['approx_kl']:>8.4f} "
+                        f"{stats['accuracy']:>7.2%} {stats['seq_kl']:>8.4f} "
                         f"{stats['ratio_clip_frac']:>8.3f}"
                     )
 
