@@ -64,20 +64,70 @@ def load_gsm8k_data(parquet_path: str) -> Dataset:
             return str(reward_model["ground_truth"])
         return str(example.get("ground_truth", example.get("answer", "")))
 
+    def extract_solution(example) -> str:
+        """Extract the full chain-of-thought solution from the parquet record.
+
+        The verl preprocessing script (volcengine/verl) stores the raw GSM8K
+        answer (full CoT reasoning + final number) in extra_info.answer, while
+        the extracted numeric answer goes to reward_model.ground_truth.
+        We check multiple locations for backward compatibility.
+        """
+        # 1. Primary: verl's extra_info.answer contains the full reasoning chain
+        extra_info = example.get("extra_info", None)
+        if isinstance(extra_info, dict):
+            raw_answer = extra_info.get("answer", "")
+            if raw_answer and len(str(raw_answer)) > 10:
+                return str(raw_answer)
+        # extra_info might have been serialized as a JSON string
+        if isinstance(extra_info, str) and len(extra_info) > 10:
+            try:
+                import json
+                parsed = json.loads(extra_info)
+                if isinstance(parsed, dict) and parsed.get("answer"):
+                    return str(parsed["answer"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        # 2. Fallback: some dataset versions have top-level solution/answer_detail
+        solution = example.get("solution", example.get("answer_detail", None))
+        if solution and len(str(solution)) > 10:
+            return str(solution)
+
+        # 3. Last resort: check top-level answer (may contain CoT in raw GSM8K)
+        top_answer = example.get("answer", "")
+        if top_answer and len(str(top_answer)) > 10:
+            return str(top_answer)
+
+        return ""
+
     def format_sft_example(example):
-        """Create a properly formatted SFT example with step-by-step reasoning."""
+        """Create a properly formatted SFT example with step-by-step reasoning.
+
+        The verl-preprocessed GSM8K parquet stores:
+        - reward_model.ground_truth: numeric answer only (e.g. "42")
+        - extra_info.answer: full chain-of-thought + final answer
+
+        We construct training examples that include the full reasoning chain
+        so the SFT model learns BOTH math reasoning AND output format,
+        rather than just memorizing output patterns.
+        """
         prompt = extract_prompt(example.get("prompt", example.get("question", "")))
         answer = extract_ground_truth(example)
 
-        # Build a demonstration with proper step-by-step structure
-        # The prompt already includes "Let's think step by step and output
-        # the final answer after ####"
-        response = f" {answer}"
-
-        # If we have a full solution (some GSM8K versions include this)
-        solution = example.get("solution", example.get("answer_detail", None))
-        if solution and len(str(solution)) > 10:
-            response = f" {solution}\n#### {answer}"
+        # Try to include the full chain-of-thought solution
+        solution = extract_solution(example)
+        if solution:
+            # The solution already ends with the answer in GSM8K format.
+            # Avoid double-appending: if it already contains the answer,
+            # use it as-is; otherwise append "#### {answer}".
+            if str(answer) in solution:
+                response = f" {solution}"
+            else:
+                response = f" {solution}\n#### {answer}"
+        else:
+            # No solution available — fall back to bare answer.
+            # The model will only learn the output format, not reasoning.
+            response = f" #### {answer}"
 
         return {"prompt": prompt, "response": response}
 

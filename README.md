@@ -40,13 +40,15 @@ advantage = (reward - group_mean) / group_std
 - SFT labels 会 mask prompt token，只训练 response 部分。
 - 使用 Transformers 新 API：`eval_strategy`、`processing_class`、`warmup_steps`。
 
-### V100 兼容
+### 推荐硬件：4x A100
 
-V100-32GB 可以跑本项目的小模型实验，但建议：
+当前推荐在 **4x A100 40GB/80GB** 上运行本项目：
 
-- 训练优先使用 GRPO 单卡或 PPO 小 batch。
-- 评估使用 `--dtype fp16`，或默认 `--dtype auto`，V100 会自动选择 fp16。
-- 不建议安装只支持 Ampere+ 的 flash-attn v2。
+- PPO/verl：使用 4 卡 FSDP/vLLM，是主要训练路径。
+- SFT warmup：单卡或 4 卡机器均可轻松完成。
+- GRPO 原型：当前仍是单进程/单卡 trainer，建议在 4 卡机器上指定 1 张空闲 A100 跑验证。
+
+V100-32GB 仍可用于 smoke test 和小规模验证，但吞吐、数值稳定性和 flash-attn/vLLM 支持都弱于 A100。
 
 ## 项目结构
 
@@ -76,6 +78,7 @@ RL_verl/
 │   ├── train_grpo.sh
 │   ├── sft_warmup.py
 │   ├── train_ppo.sh
+│   ├── train_4gpu.sh
 │   ├── train_8gpu.sh
 │   ├── train_quick.sh
 │   ├── evaluate.py
@@ -146,15 +149,17 @@ python scripts/sft_warmup.py \
 checkpoints/sft_warmup/final
 ```
 
-### 2. GRPO 单卡训练
+### 2. GRPO 单卡验证
 
-当前 GRPO 是单进程训练器，请使用单卡运行：
+当前 GRPO 是单进程训练器，即使机器有 4 张 A100，也只使用 1 张 GPU。建议先用它验证 GRPO 奖励/训练链路：
 
 ```bash
 ./scripts/train_grpo.sh \
   --n-gpus 1 \
   --model ./checkpoints/sft_warmup/final \
   --group-size 4 \
+  --batch-size 4 \
+  --max-response-length 384 \
   --total-steps 1000 \
   --w-correctness 0.7 \
   --w-format 0.1 \
@@ -175,10 +180,13 @@ python scripts/train_grpo.py \
 
 ### 3. PPO 多卡训练
 
-如需多卡/FSDP/verl 体系，使用 PPO 脚本：
+4x A100 推荐使用 PPO/verl 作为正式多卡训练路径：
 
 ```bash
-./scripts/train_8gpu.sh --model ./checkpoints/sft_warmup/final
+./scripts/train_4gpu.sh \
+  --gpus 4 \
+  --batch-size 512 \
+  --model ./checkpoints/sft_warmup/final
 ```
 
 或：
@@ -195,12 +203,12 @@ python -m verl.trainer.main_ppo \
 | 项目 | PPO/verl | 当前 GRPO trainer |
 |------|----------|-------------------|
 | 训练入口 | `python -m verl.trainer.main_ppo` | `python scripts/train_grpo.py` |
-| 多卡支持 | 支持 | 暂不支持 |
+| 4x A100 支持 | 推荐 | 仅使用单卡 |
 | Critic | 需要 | 不需要 |
 | Rollout | vLLM/verl worker | live HF policy |
 | 优势估计 | GAE | 组内相对优势 |
 | KL | verl KL controller | loss 内 KL penalty |
-| 适合场景 | 正式多卡训练 | 单卡验证 GRPO 思路 |
+| 适合场景 | 4卡正式训练 | 单卡验证 GRPO 思路 |
 
 GRPO 默认配置：
 
@@ -325,6 +333,28 @@ python scripts/evaluate.py ... --dtype fp16
 
 训练脚本默认使用 fp16。
 
+### 4x A100 推荐参数
+
+PPO 正式训练：
+
+```bash
+./scripts/train_4gpu.sh \
+  --gpus 4 \
+  --batch-size 512 \
+  --model ./checkpoints/sft_warmup/final
+```
+
+GRPO 单卡验证：
+
+```bash
+./scripts/train_grpo.sh \
+  --n-gpus 1 \
+  --batch-size 4 \
+  --group-size 4 \
+  --max-response-length 384 \
+  --model ./checkpoints/sft_warmup/final
+```
+
 ### GRPO OOM
 
 降低 batch 或 group size：
@@ -338,7 +368,7 @@ python scripts/evaluate.py ... --dtype fp16
 降低 PPO batch/micro batch：
 
 ```bash
-./scripts/train_8gpu.sh --batch-size 512
+./scripts/train_4gpu.sh --batch-size 512
 ```
 
 ## 许可证
