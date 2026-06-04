@@ -28,6 +28,7 @@ REWARD_MODE="legacy_reasoning"
 USE_VLLM=true
 VLLM_SYNC_INTERVAL=1
 VLLM_GPU_MEMORY_UTILIZATION=0.25
+VLLM_MAX_MODEL_LEN=2048
 LR=""
 KL_COEF=""
 
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --no-vllm)      USE_VLLM=false; shift ;;
     --vllm-sync-interval) VLLM_SYNC_INTERVAL="$2"; shift 2 ;;
     --vllm-gpu-memory-utilization) VLLM_GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
+    --vllm-max-model-len) VLLM_MAX_MODEL_LEN="$2"; shift 2 ;;
     --w-correctness) W_CORRECTNESS="$2"; shift 2 ;;
     --w-format)     W_FORMAT="$2"; shift 2 ;;
     --w-reasoning)  W_REASONING="$2"; shift 2 ;;
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [--n-gpus N] [--group-size K] [--batch-size N] [--max-response-length N]"
       echo "          [--total-steps N] [--lr LR] [--kl-coef F] [--model PATH] [--reward-mode MODE]"
       echo "          [--use-vllm|--no-vllm] [--vllm-sync-interval N] [--vllm-gpu-memory-utilization F]"
+      echo "          [--vllm-max-model-len N]"
       echo "          [--w-correctness F] [--w-format F] [--w-reasoning F]"
       exit 1
       ;;
@@ -88,6 +91,7 @@ echo "  Rollout:      $([ "$USE_VLLM" = true ] && echo "vLLM" || echo "HF live p
 if [ "$USE_VLLM" = true ]; then
   echo "  vLLM sync:    every $VLLM_SYNC_INTERVAL step(s)"
   echo "  vLLM mem util:$VLLM_GPU_MEMORY_UTILIZATION"
+  echo "  vLLM max len: $VLLM_MAX_MODEL_LEN"
 fi
 if [ -n "$LR" ]; then
   echo "  LR override:  $LR"
@@ -120,6 +124,7 @@ if [ "$USE_VLLM" = true ]; then
   GRPO_ARGS+=(--use-vllm)
   GRPO_ARGS+=(--vllm-sync-interval "$VLLM_SYNC_INTERVAL")
   GRPO_ARGS+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+  GRPO_ARGS+=(--vllm-max-model-len "$VLLM_MAX_MODEL_LEN")
 else
   GRPO_ARGS+=(--no-vllm)
 fi

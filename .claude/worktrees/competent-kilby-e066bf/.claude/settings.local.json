@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C F:/RL_verl diff --staged)",
+      "Bash(git -C F:/RL_verl diff)",
+      "Bash(git -C F:/RL_verl show HEAD:scripts/sft_warmup.py)",
+      "Bash(git -C F:/RL_verl add config/grpo_gsm8k.yaml config/ppo_gsm8k.yaml scripts/run_ablation_experiments.sh scripts/train_8gpu.sh scripts/train_grpo.sh scripts/train_quick.sh scripts/train_4gpu.sh)",
+      "Bash(git -C F:/RL_verl commit -m ' *)",
+      "Bash(git -C F:/RL_verl push origin master)",
+      "Bash(git -C F:/RL_verl status --short)",
+      "Bash(git -C F:/RL_verl diff -- config/grpo_gsm8k.yaml scripts/train_grpo.sh scripts/train_grpo.py)",
+      "Bash(git -C F:/RL_verl add config/grpo_gsm8k.yaml scripts/train_grpo.sh scripts/train_grpo.py)",
+      "Bash(git -C \"/f/RL_verl\" status --short -- \"scripts/train_grpo.py\" \"scripts/grpo_core.py\" \"scripts/reward_fn.py\" \"config/grpo_gsm8k.yaml\" \"scripts/train_grpo.sh\")",
+      "Bash(git -C \"/f/RL_verl\" diff -- \"scripts/train_grpo.py\" \"scripts/grpo_core.py\" \"scripts/reward_fn.py\" \"config/grpo_gsm8k.yaml\" \"scripts/train_grpo.sh\")",
+      "Bash(git -C F:/RL_verl add config/grpo_gsm8k.yaml scripts/train_grpo.py scripts/reward_fn.py verl_rewards/format.py verl_rewards/composite.py)",
+      "Bash(git -C F:/RL_verl add scripts/train_grpo.py)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_parquet\\(os.path.expanduser\\('~/data/gsm8k/train.parquet'\\)\\); print\\('Columns:', list\\(df.columns\\)\\); print\\('Shape:', df.shape\\); print\\(\\); print\\('First row:'\\); print\\(df.iloc[0].to_dict\\(\\)\\)\")",
+      "Bash(python -c \"import os; print\\(os.path.expanduser\\('~/data/gsm8k/train.parquet'\\)\\)\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

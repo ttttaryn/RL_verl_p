@@ -56,6 +56,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 4
     tensor_model_parallel_size: 1
     gpu_memory_utilization: 0.25
+    max_model_len: 2048          # GSM8K does not need Qwen's 32k context; saves vLLM KV cache memory
     generation_batch_size: 1     # HF fallback generation micro-batch
     temperature: 0.7
     top_p: 0.95

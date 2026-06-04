@@ -223,7 +223,8 @@ class RolloutEngine:
                  use_vllm: bool = False,
                  generation_batch_size: int = 8,
                  vllm_dtype: str = "float16",
-                 enforce_eager: bool = False):
+                 enforce_eager: bool = False,
+                 max_model_len: Optional[int] = None):
         self.model_path = model_path
         self.temperature = temperature
         self.top_p = top_p
@@ -233,6 +234,7 @@ class RolloutEngine:
         self.tensor_parallel_size = tensor_parallel_size
         self.vllm_dtype = vllm_dtype
         self.enforce_eager = enforce_eager
+        self.max_model_len = max_model_len
         self._use_vllm = False
         self.llm = None
         self.model = None
@@ -257,14 +259,17 @@ class RolloutEngine:
     def _load_vllm(self, model_path: str):
         """Load a vLLM engine from a model path."""
         self.model_path = model_path
-        self.llm = self._LLM(
-            model=model_path,
-            tensor_parallel_size=self.tensor_parallel_size,
-            gpu_memory_utilization=self.gpu_memory_utilization,
-            trust_remote_code=True,
-            dtype=self.vllm_dtype,
-            enforce_eager=self.enforce_eager,
-        )
+        llm_kwargs = {
+            "model": model_path,
+            "tensor_parallel_size": self.tensor_parallel_size,
+            "gpu_memory_utilization": self.gpu_memory_utilization,
+            "trust_remote_code": True,
+            "dtype": self.vllm_dtype,
+            "enforce_eager": self.enforce_eager,
+        }
+        if self.max_model_len is not None:
+            llm_kwargs["max_model_len"] = self.max_model_len
+        self.llm = self._LLM(**llm_kwargs)
         self.sampling_params = self._SamplingParams(
             temperature=self.temperature,
             top_p=self.top_p,
@@ -273,7 +278,8 @@ class RolloutEngine:
         print(
             "  vLLM engine initialized "
             f"(model={model_path}, tp={self.tensor_parallel_size}, "
-            f"mem={self.gpu_memory_utilization}, dtype={self.vllm_dtype})"
+            f"mem={self.gpu_memory_utilization}, dtype={self.vllm_dtype}, "
+            f"max_model_len={self.max_model_len})"
         )
 
     def unload_vllm(self):
@@ -494,6 +500,7 @@ class GRPOTrainer:
             generation_batch_size=self.model_config.get("rollout", {}).get("generation_batch_size", 2),
             vllm_dtype=self.model_config.get("rollout", {}).get("vllm_dtype", "float16"),
             enforce_eager=bool(self.model_config.get("rollout", {}).get("enforce_eager", False)),
+            max_model_len=self.model_config.get("rollout", {}).get("max_model_len", None),
         )
         if not self.rollout._use_vllm:
             self.rollout.set_hf_model(self.policy, self.tokenizer)
@@ -897,6 +904,7 @@ class GRPOTrainer:
             "vllm_sync_interval": self.vllm_sync_interval if self.use_vllm_rollout else None,
             "vllm_sync_dir": self.vllm_sync_dir if self.use_vllm_rollout else None,
             "vllm_gpu_memory_utilization": self.model_config.get("rollout", {}).get("gpu_memory_utilization", None),
+            "vllm_max_model_len": self.model_config.get("rollout", {}).get("max_model_len", None),
             "vllm_dtype": self.model_config.get("rollout", {}).get("vllm_dtype", None),
             "reward_weights": self.reward_weights,
             "total_steps": self.total_steps,
@@ -936,6 +944,8 @@ def main():
                         help="Reload vLLM from current policy every N GRPO steps")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=None,
                         help="vLLM gpu_memory_utilization")
+    parser.add_argument("--vllm-max-model-len", type=int, default=None,
+                        help="Limit vLLM max_model_len to reduce KV cache memory")
     parser.add_argument(
         "--reward-mode",
         choices=["legacy_reasoning", "answer_conditioned_reasoning"],
@@ -982,6 +992,8 @@ def main():
         rollout_cfg["vllm_sync_interval"] = args.vllm_sync_interval
     if args.vllm_gpu_memory_utilization is not None:
         rollout_cfg["gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
+    if args.vllm_max_model_len is not None:
+        rollout_cfg["max_model_len"] = args.vllm_max_model_len
     if args.reward_mode is not None:
         config["reward_mode"] = args.reward_mode
         config["warmup_use_legacy_reward"] = args.reward_mode == "legacy_reasoning"
