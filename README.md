@@ -1,69 +1,72 @@
-﻿# verl Multi-Reward RL Training Project
+# GRPO GSM8K Math Reasoning Project
 
-本项目基于 `verl` 框架，为 GSM8K 数学推理任务实现多奖励 RL 训练，并新增一个独立的 GRPO 原型训练器。当前版本重点修复了早期设计中“格式奖励被重复计数”“推理奖励可被格式刷分”“baseline 过弱导致结论偏乐观”等问题。
+本项目是一个面向 GSM8K 数学推理任务的 **GRPO 强化学习训练系统**。项目以 `Qwen2.5-1.5B-Instruct` 为基座模型，围绕 SFT warmup、GRPO 组内相对优势、多奖励函数、reward hacking 诊断和批量消融实验构建完整实验链路。
 
-## 当前状态
+当前仓库已经收敛为 GRPO-only 项目：所有训练、消融、评估和结果记录都围绕 GRPO 展开。
 
-### 奖励系统 v2
+## 项目目标
 
-旧版奖励存在两个关键问题：
+- 使用 SFT warmup 建立 GSM8K 解题格式和基础数学能力。
+- 使用 GRPO 对同一 prompt 采样多条 response，并基于组内相对奖励计算 advantage。
+- 通过 correctness、format、reasoning 三类奖励分析模型行为。
+- 区分 legacy reasoning 与 answer-conditioned reasoning，避免把格式刷分误判为推理能力提升。
+- 在结果 JSON 中记录完整实验元数据，保证实验可复查。
 
-- `correctness(strict)` 和 `format(gsm8k)` 使用同一个 `#### NUMBER` 正则，导致格式缺失时正确性和格式同时归零。
-- `reasoning_reward` 实际只衡量长度和步骤标记，模型可以用格式化但错误的推理获得高分。
+## 核心方法
 
-v2 的默认行为：
+### GRPO
 
-- `correctness_method="flexible"`：正确性提取不再依赖 `####` 格式。
-- `format_reward`：检查步骤标记、计算过程、答案标记，而不是只检查 `####`。
-- `answer_conditioned_reasoning=True`：只有答案正确时才给推理结构奖励，错误答案的推理分为 0。
-
-### GRPO 训练器
-
-新增 `scripts/train_grpo.py` 和 `scripts/grpo_core.py`，实现 Group Relative Policy Optimization：
+GRPO 使用同一 prompt 的 K 条 completion 组成一个 group，并在组内标准化奖励：
 
 ```text
-advantage = (reward - group_mean) / group_std
+advantage_i = (reward_i - mean(group_rewards)) / std(group_rewards)
 ```
 
-当前 GRPO 训练器是**单进程/单卡可信实现**：
+本项目中的 GRPO trainer 位于：
 
-- rollout 使用当前 live policy，避免静态 vLLM 一直从初始权重采样。
-- 训练 logprob 基于 `prompt + response`，loss 只作用于 response token。
-- 默认不启用 vLLM；如需 vLLM，需要实现权重同步后再打开。
-- 不支持 `torchrun` 多进程训练；多卡训练建议继续使用 PPO/verl 脚本。
+```text
+scripts/train_grpo.py
+scripts/grpo_core.py
+```
 
-### SFT 预热
+当前实现是单进程/单卡 trainer，适合 Qwen2.5-1.5B 级别模型的研究型训练与消融实验。它不依赖 critic/value model。
 
-新增 `scripts/sft_warmup.py`，用于在 RL 前建立更合理的数学 baseline：
+### Reward 模式
 
-- 支持常见 GSM8K/verl parquet schema，包括 chat prompt 和 `reward_model.ground_truth`。
-- SFT labels 会 mask prompt token，只训练 response 部分。
-- 使用 Transformers 新 API：`eval_strategy`、`processing_class`、`warmup_steps`。
+项目明确区分两套 reasoning reward：
 
-### 推荐硬件：4x A100
+| 模式 | 配置值 | 用途 |
+|------|--------|------|
+| legacy_reasoning | `reward_mode: legacy_reasoning` | warmup 或对照实验；推理分只看长度和步骤结构，不要求答案正确 |
+| answer_conditioned_reasoning | `reward_mode: answer_conditioned_reasoning` | 最终诊断和防 reward hacking；只有答案正确时才给 reasoning reward |
 
-当前推荐在 **4x A100 40GB/80GB** 上运行本项目：
+默认训练配置使用 `legacy_reasoning`，原因是 GRPO 早期训练需要更密的结构信号；最终评估和 reward hacking 诊断建议使用 `answer_conditioned_reasoning` 复算 reward breakdown。
 
-- PPO/verl：使用 4 卡 FSDP/vLLM，是主要训练路径。
-- SFT warmup：单卡或 4 卡机器均可轻松完成。
-- GRPO 原型：当前仍是单进程/单卡 trainer，建议在 4 卡机器上指定 1 张空闲 A100 跑验证。
+### 多奖励函数
 
-V100-32GB 仍可用于 smoke test 和小规模验证，但吞吐、数值稳定性和 flash-attn/vLLM 支持都弱于 A100。
+奖励由三部分组成：
+
+```text
+reward = wc * correctness + wf * format + wr * reasoning
+```
+
+- `correctness`：答案抽取与 ground truth 比较，默认使用 flexible extraction，不依赖 `####`。
+- `format`：检查步骤结构、计算过程和答案标记，与答案正确性解耦。
+- `reasoning`：支持 legacy 或 answer-conditioned 两种模式。
 
 ## 项目结构
 
 ```text
 RL_verl/
 ├── config/
-│   ├── ppo_gsm8k.yaml
 │   ├── grpo_gsm8k.yaml
 │   └── experiments/
 │       ├── exp1_correctness_only.yaml
 │       ├── exp2_multi_reward_default.yaml
 │       ├── exp3_heavy_reasoning.yaml
 │       ├── exp4_balanced.yaml
-│       ├── exp5_xml_format.yaml
-│       ├── exp6_legacy_comparison.yaml
+│       ├── exp5_format_emphasis.yaml
+│       ├── exp6_answer_conditioned_diagnostic.yaml
 │       └── grpo_default.yaml
 ├── verl_rewards/
 │   ├── correctness.py
@@ -71,24 +74,19 @@ RL_verl/
 │   ├── reasoning.py
 │   └── composite.py
 ├── scripts/
-│   ├── reward_fn.py
-│   ├── multi_reward_manager.py
-│   ├── grpo_core.py
 │   ├── train_grpo.py
 │   ├── train_grpo.sh
-│   ├── sft_warmup.py
-│   ├── train_ppo.sh
-│   ├── train_4gpu.sh
-│   ├── train_8gpu.sh
-│   ├── train_quick.sh
+│   ├── run_ablation_experiments.sh
 │   ├── evaluate.py
+│   ├── evaluate_all_models.sh
+│   ├── reward_fn.py
+│   ├── grpo_core.py
+│   ├── sft_warmup.py
 │   └── analyze_metrics.py
-├── results/
-├── outputs/
-└── checkpoints/
+└── results/
 ```
 
-## 安装
+## 环境安装
 
 ```bash
 conda create -n verl python=3.10 -y
@@ -97,45 +95,36 @@ conda activate verl
 pip install torch torchvision torchaudio \
   --index-url https://download.pytorch.org/whl/cu121
 
-pip install transformers datasets pandas tqdm omegaconf
+pip install transformers datasets pandas tqdm omegaconf matplotlib
 ```
 
-如需使用 PPO/verl：
+当前 GRPO trainer 默认使用 vLLM rollout。为了避免 vLLM 一直从初始权重采样，训练器会周期性将当前 policy 保存到 `_vllm_sync/policy_current`，并从该 checkpoint 重载 vLLM engine。
 
-```bash
-git clone https://github.com/volcengine/verl.git
-cd verl
-pip install -e .
-pip install -r requirements.txt
-```
-
-`vllm` 是可选依赖。当前 GRPO 训练器默认使用 HF policy rollout，不依赖 vLLM。
+如果只想调试链路，可以临时使用 `--no-vllm` 回退到 HuggingFace `generate`。
 
 ## 数据准备
 
-使用 verl 官方 GSM8K 预处理脚本：
+使用 verl 官方 GSM8K 预处理脚本生成 parquet：
 
 ```bash
 cd ~/verl
 python examples/data_preprocess/gsm8k.py --local_save_dir $HOME/data/gsm8k/
 ```
 
-默认数据路径：
+默认路径：
 
 ```text
 $HOME/data/gsm8k/train.parquet
 $HOME/data/gsm8k/test.parquet
 ```
 
-## 推荐训练流程
+## 训练流程
 
-### 1. SFT 预热
+### 1. SFT Warmup
 
 ```bash
-cd ~/RL_verl
-
 python scripts/sft_warmup.py \
-  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
   --train-data $HOME/data/gsm8k/train.parquet \
   --val-data $HOME/data/gsm8k/test.parquet \
   --output ./checkpoints/sft_warmup \
@@ -143,233 +132,141 @@ python scripts/sft_warmup.py \
   --lr 2e-5
 ```
 
-输出模型位于：
+输出：
 
 ```text
 checkpoints/sft_warmup/final
 ```
 
-### 2. GRPO 单卡验证
-
-当前 GRPO 是单进程训练器，即使机器有 4 张 A100，也只使用 1 张 GPU。建议先用它验证 GRPO 奖励/训练链路：
+### 2. GRPO 训练
 
 ```bash
 ./scripts/train_grpo.sh \
-  --n-gpus 1 \
   --model ./checkpoints/sft_warmup/final \
+  --use-vllm \
+  --vllm-sync-interval 1 \
+  --vllm-gpu-memory-utilization 0.25 \
   --group-size 4 \
-  --batch-size 4 \
-  --max-response-length 384 \
+  --batch-size 2 \
+  --max-response-length 256 \
   --total-steps 1000 \
   --w-correctness 0.7 \
   --w-format 0.1 \
   --w-reasoning 0.2
 ```
 
-也可以直接运行 Python：
+也可以直接运行：
 
 ```bash
 python scripts/train_grpo.py \
   --config config/grpo_gsm8k.yaml \
   --model ./checkpoints/sft_warmup/final \
+  --use-vllm \
+  --vllm-sync-interval 1 \
   --group-size 4 \
+  --batch-size 2 \
   --total-steps 1000
 ```
 
-注意：`scripts/train_grpo.py` 会解析 OmegaConf 风格配置，例如 `${oc.env:HOME}` 和 `${trainer.project_name}`。
-
-### 3. PPO 多卡训练
-
-4x A100 推荐使用 PPO/verl 作为正式多卡训练路径：
+### 3. GRPO 消融实验
 
 ```bash
-./scripts/train_4gpu.sh \
-  --gpus 4 \
-  --batch-size 512 \
+./scripts/run_ablation_experiments.sh \
+  --model ./checkpoints/sft_warmup/final \
+  --total-steps 1000
+```
+
+只查看计划：
+
+```bash
+./scripts/run_ablation_experiments.sh --dry-run
+```
+
+## 推荐配置
+
+| 项目 | 推荐值 |
+|------|--------|
+| Base model | `Qwen/Qwen2.5-1.5B-Instruct` |
+| SFT checkpoint | `./checkpoints/sft_warmup/final` |
+| Group size | 4 |
+| Train batch size | 2 prompts/step |
+| Max response length | 256 |
+| Temperature | 0.7 |
+| Top-p | 0.95 |
+| KL coef | 0.001 |
+| Rollout engine | vLLM |
+| vLLM sync interval | 1 step |
+| vLLM memory utilization | 0.25 |
+| Reward mode | `legacy_reasoning` for training, `answer_conditioned_reasoning` for final diagnostics |
+
+如果出现 OOM：
+
+```bash
+./scripts/train_grpo.sh \
+  --use-vllm \
+  --vllm-gpu-memory-utilization 0.15 \
+  --group-size 2 \
+  --batch-size 1 \
+  --max-response-length 128 \
   --model ./checkpoints/sft_warmup/final
-```
-
-或：
-
-```bash
-export PYTHONPATH="${PWD}:${PYTHONPATH}"
-python -m verl.trainer.main_ppo \
-  --config-path=config \
-  --config-name=ppo_gsm8k
-```
-
-## GRPO vs PPO
-
-| 项目 | PPO/verl | 当前 GRPO trainer |
-|------|----------|-------------------|
-| 训练入口 | `python -m verl.trainer.main_ppo` | `python scripts/train_grpo.py` |
-| 4x A100 支持 | 推荐 | 仅使用单卡 |
-| Critic | 需要 | 不需要 |
-| Rollout | vLLM/verl worker | live HF policy |
-| 优势估计 | GAE | 组内相对优势 |
-| KL | verl KL controller | loss 内 KL penalty |
-| 适合场景 | 4卡正式训练 | 单卡验证 GRPO 思路 |
-
-GRPO 默认配置：
-
-```yaml
-algorithm:
-  type: grpo
-  group_size: 4
-  advantage:
-    method: group_relative
-    norm_method: standardize
-  kl_penalty:
-    kl_coef: 0.001
-    estimator: k3
-```
-
-`k3` 是非负 KL 近似，比直接 sampled log-ratio 更稳。
-
-## 奖励函数说明
-
-综合奖励：
-
-```python
-reward = (
-    w_correctness * correctness_reward +
-    w_format * format_reward +
-    w_reasoning * reasoning_reward
-)
-```
-
-默认权重：
-
-```text
-w_correctness = 0.7
-w_format      = 0.1
-w_reasoning   = 0.2
-```
-
-组件说明：
-
-| 组件 | v1 行为 | v2 行为 |
-|------|---------|---------|
-| correctness | strict 模式要求 `#### NUMBER` | flexible 模式，提取最后有效数字 |
-| format | 只检查 `#### NUMBER` | 检查步骤、计算、答案标记 |
-| reasoning | 长度 + 步骤启发式 | 答案正确时才给结构奖励 |
-
-旧版对照实验仍保留：
-
-```bash
-./scripts/train_ppo.sh --config experiments/exp6_legacy_comparison
 ```
 
 ## 评估
 
-### 普通评估
-
 ```bash
 python scripts/evaluate.py \
-  --model-path checkpoints/sft_warmup/final \
+  --model-path ./checkpoints/verl_grpo/gsm8k_grpo_multi_reward/final \
   --test-data $HOME/data/gsm8k/test.parquet \
-  --output results/sft_eval.json \
-  --batch-size 16
+  --output results/eval_w0.7_0.1_0.2.json \
+  --temperature 0 \
+  --batch-size 8
 ```
 
-### V100 / fp16 评估
+评估结果 JSON 会记录：
 
-```bash
-python scripts/evaluate.py \
-  --model-path checkpoints/sft_warmup/final \
-  --test-data $HOME/data/gsm8k/test.parquet \
-  --dtype fp16 \
-  --output results/sft_eval_v100.json
+- `base_model`
+- `sft_checkpoint`
+- `grpo_config`
+- `reward_mode`
+- `group_size`
+- `batch_size`
+- `temperature`
+- `kl_coef`
+- `rollout_engine`
+- `vllm_sync_interval`
+- `vllm_gpu_memory_utilization`
+- reward weights
+- summary metrics
+
+## 结果文件
+
+新生成的 `results/*.json` 会在顶层记录实验元数据，用于复现实验环境和训练设置。示例：
+
+```json
+{
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "sft_checkpoint": "./checkpoints/sft_warmup/final",
+  "grpo_config": "config/grpo_gsm8k.yaml",
+  "reward_mode": "legacy_reasoning",
+  "group_size": 4,
+  "batch_size": 2,
+  "temperature": 0.7,
+  "kl_coef": 0.001,
+  "rollout_engine": "vllm",
+  "vllm_sync_interval": 1,
+  "vllm_gpu_memory_utilization": 0.25
+}
 ```
 
-`--dtype auto` 的策略：
+仓库中如果保留了历史结果文件，不应在未重新评估的情况下改写其模型路径或指标。新的 Qwen2.5-1.5B GRPO 结果应通过 `scripts/evaluate.py` 重新生成，或至少遵循 [results/qwen2.5-1.5b-grpo_result_schema.json](results/qwen2.5-1.5b-grpo_result_schema.json) 中的字段约定。
 
-- Ampere+ GPU：`bf16`
-- V100/更老 GPU：`fp16`
+## 已知边界
 
-### 主要指标
-
-| 指标 | 含义 |
-|------|------|
-| `accuracy` | 最终答案正确率 |
-| `correctness_score` | 正确性奖励 |
-| `format_score` | 输出结构奖励 |
-| `reasoning_score` | 答案条件推理结构奖励 |
-| `score` | 综合奖励 |
-
-## 已知限制
-
-1. **GRPO 多卡未实现**
-   当前 `scripts/train_grpo.py` 会拒绝 `torchrun` 多进程启动。需要 DDP/FSDP 后才能可靠多卡。
-
-2. **GRPO vLLM 默认关闭**
-   静态 vLLM 不会自动同步 policy 权重。没有权重同步时，rollout 会来自旧模型，实验结论不可信。
-
-3. **推理奖励仍是弱代理**
-   v2 用正确性门控降低 reward hacking，但它仍不是严格的推理质量判别器。更强方案可以引入 verifier 或 LLM-as-judge。
-
-4. **历史 results 为 v1 奖励结果**
-   `results/` 下旧 JSON 使用 v1 奖励逻辑。用 v2 重新评估时，`reasoning_score` 会明显变化。
-
-## 常见问题
-
-### `TrainingArguments.__init__()` 参数报错
-
-本项目已使用较新的 Transformers API：
-
-- `eval_strategy`
-- `processing_class`
-- `warmup_steps`
-
-如果仍报错，请检查本地 `transformers` 版本。
-
-### V100 上 bf16 报错或很慢
-
-使用：
-
-```bash
-python scripts/evaluate.py ... --dtype fp16
-```
-
-训练脚本默认使用 fp16。
-
-### 4x A100 推荐参数
-
-PPO 正式训练：
-
-```bash
-./scripts/train_4gpu.sh \
-  --gpus 4 \
-  --batch-size 512 \
-  --model ./checkpoints/sft_warmup/final
-```
-
-GRPO 单卡验证：
-
-```bash
-./scripts/train_grpo.sh \
-  --n-gpus 1 \
-  --batch-size 4 \
-  --group-size 4 \
-  --max-response-length 384 \
-  --model ./checkpoints/sft_warmup/final
-```
-
-### GRPO OOM
-
-降低 batch 或 group size：
-
-```bash
-./scripts/train_grpo.sh --n-gpus 1 --group-size 2
-```
-
-### PPO OOM
-
-降低 PPO batch/micro batch：
-
-```bash
-./scripts/train_4gpu.sh --batch-size 512
-```
+- 当前 GRPO trainer 是单进程/单卡实现，不支持 `torchrun` 多进程。
+- vLLM 使用 checkpoint-based sync。`vllm_sync_interval=1` 最接近 on-policy，但会频繁保存/重载 engine；增大该值会提升吞吐，但 rollout 会更 stale。
+- 如果 vLLM 与 policy/ref/optimizer 同卡导致 OOM，优先降低 `--vllm-gpu-memory-utilization`，其次降低 batch/group/response length。
+- `legacy_reasoning` 可以提供训练信号，但会高估错误答案的 reasoning score；最终报告应使用 answer-conditioned reward breakdown 进行诊断。
+- 结果指标应和对应的模型、reward mode、config 一起报告，避免把格式学习误判为数学能力提升。
 
 ## 许可证
 

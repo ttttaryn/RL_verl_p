@@ -88,9 +88,9 @@ def load_verl_checkpoint(model_path: str, base_model_path: str = None, dtype: st
             with open(config_path) as f:
                 config = json.load(f)
                 # Try to get original model name
-                base_model_path = config.get("_name_or_path", "Qwen/Qwen2.5-0.5B-Instruct")
+                base_model_path = config.get("_name_or_path", "Qwen/Qwen2.5-1.5B-Instruct")
         else:
-            base_model_path = "Qwen/Qwen2.5-0.5B-Instruct"
+            base_model_path = "Qwen/Qwen2.5-1.5B-Instruct"
     
     print(f"Using base model: {base_model_path}")
     
@@ -336,6 +336,7 @@ def evaluate_model(
     temperature: float = 0.7,
     base_model_path: Optional[str] = None,
     dtype: str = "auto",
+    experiment_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate a model on GSM8K test set.
     
@@ -481,6 +482,18 @@ def evaluate_model(
         
         output = {
             "model_path": model_path,
+            "base_model": (experiment_metadata or {}).get("base_model", base_model_path or "Qwen/Qwen2.5-1.5B-Instruct"),
+            "sft_checkpoint": (experiment_metadata or {}).get("sft_checkpoint", "./checkpoints/sft_warmup/final"),
+            "grpo_config": (experiment_metadata or {}).get("grpo_config", "config/grpo_gsm8k.yaml"),
+            "reward_mode": (experiment_metadata or {}).get("reward_mode", "answer_conditioned_reasoning"),
+            "group_size": (experiment_metadata or {}).get("group_size", 4),
+            "batch_size": (experiment_metadata or {}).get("batch_size", batch_size),
+            "temperature": temperature,
+            "kl_coef": (experiment_metadata or {}).get("kl_coef", 0.001),
+            "rollout_engine": (experiment_metadata or {}).get("rollout_engine", "vllm"),
+            "vllm_sync_interval": (experiment_metadata or {}).get("vllm_sync_interval", 1),
+            "vllm_gpu_memory_utilization": (experiment_metadata or {}).get("vllm_gpu_memory_utilization", 0.25),
+            "experiment_metadata": experiment_metadata or {},
             "test_data_path": test_data_path,
             "num_samples": len(results),
             "reward_weights": reward_weights,
@@ -519,6 +532,27 @@ def main():
                         help="Weight for reasoning reward")
     parser.add_argument("--base-model", type=str, default=None,
                         help="Base model path (for verl checkpoints)")
+    parser.add_argument("--base-model-name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
+                        help="Base model name recorded in result metadata")
+    parser.add_argument("--sft-checkpoint", type=str, default="./checkpoints/sft_warmup/final",
+                        help="SFT checkpoint recorded in result metadata")
+    parser.add_argument("--grpo-config", type=str, default="config/grpo_gsm8k.yaml",
+                        help="GRPO config path recorded in result metadata")
+    parser.add_argument("--reward-mode", choices=["legacy_reasoning", "answer_conditioned_reasoning"],
+                        default="answer_conditioned_reasoning",
+                        help="Reward mode recorded in result metadata")
+    parser.add_argument("--group-size", type=int, default=4,
+                        help="GRPO group size recorded in result metadata")
+    parser.add_argument("--train-batch-size", type=int, default=2,
+                        help="GRPO train batch size recorded in result metadata")
+    parser.add_argument("--kl-coef", type=float, default=0.001,
+                        help="GRPO KL coefficient recorded in result metadata")
+    parser.add_argument("--rollout-engine", choices=["vllm", "hf_policy"], default="vllm",
+                        help="Rollout engine recorded in result metadata")
+    parser.add_argument("--vllm-sync-interval", type=int, default=1,
+                        help="vLLM sync interval recorded in result metadata")
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.25,
+                        help="vLLM gpu_memory_utilization recorded in result metadata")
     parser.add_argument("--dtype", choices=["auto", "fp16", "bf16", "fp32"], default="auto",
                         help="Model dtype. auto uses bf16 on Ampere+ and fp16 on V100/older GPUs.")
     
@@ -544,6 +578,21 @@ def main():
         temperature=args.temperature,
         base_model_path=args.base_model,
         dtype=args.dtype,
+        experiment_metadata={
+            "base_model": args.base_model_name,
+            "sft_checkpoint": args.sft_checkpoint,
+            "grpo_config": args.grpo_config,
+            "reward_mode": args.reward_mode,
+            "group_size": args.group_size,
+            "batch_size": args.train_batch_size,
+            "temperature": args.temperature,
+            "kl_coef": args.kl_coef,
+            "rollout_engine": args.rollout_engine,
+            "vllm_sync_interval": args.vllm_sync_interval,
+            "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+            "max_new_tokens": args.max_tokens,
+            "eval_batch_size": args.batch_size,
+        },
     )
 
 

@@ -1,0 +1,24 @@
+# GRPO Experiment 6: Answer-Conditioned Reasoning Diagnostic
+#
+# This run gates reasoning reward on answer correctness. It is intended for
+# reward-hacking diagnosis and final reward breakdowns, not as the default dense
+# training signal.
+
+defaults:
+  - grpo_gsm8k
+
+trainer:
+  experiment_name: gsm8k_grpo_exp6_answer_conditioned_diagnostic
+
+reward_mode: answer_conditioned_reasoning
+warmup_use_legacy_reward: false
+
+custom_reward_function:
+  name: compute_score
+  reward_kwargs:
+    w_correctness: 0.7
+    w_format: 0.1
+    w_reasoning: 0.2
+    correctness_method: "flexible"
+    answer_conditioned_reasoning: true
+    continuous_format_reward: true

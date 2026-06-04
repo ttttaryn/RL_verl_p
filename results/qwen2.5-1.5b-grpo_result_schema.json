@@ -1,0 +1,31 @@
+{
+  "description": "Metadata schema for Qwen2.5-1.5B GRPO result files. Use this schema for newly generated evaluation JSON files; do not relabel historical 0.5B artifacts without rerunning evaluation.",
+  "required_top_level_fields": {
+    "model_path": "Path or HF repo of the evaluated GRPO checkpoint",
+    "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "sft_checkpoint": "./checkpoints/sft_warmup/final",
+    "grpo_config": "config/grpo_gsm8k.yaml",
+    "reward_mode": "legacy_reasoning or answer_conditioned_reasoning",
+    "group_size": 4,
+    "batch_size": 2,
+    "temperature": 0.7,
+    "kl_coef": 0.001,
+    "rollout_engine": "vllm",
+    "vllm_sync_interval": 1,
+    "vllm_gpu_memory_utilization": 0.25,
+    "reward_weights": {
+      "w_correctness": 0.7,
+      "w_format": 0.1,
+      "w_reasoning": 0.2
+    },
+    "summary": {
+      "accuracy": "GSM8K test accuracy",
+      "format_score_mean": "Mean format reward",
+      "reasoning_score_mean": "Mean reasoning reward under the recorded reward_mode"
+    }
+  },
+  "reward_modes": {
+    "legacy_reasoning": "Use for warmup/training or comparison experiments. Reasoning reward is heuristic and not gated on correctness.",
+    "answer_conditioned_reasoning": "Use for final diagnostics and reward-hacking checks. Reasoning reward is gated on correctness."
+  }
+}

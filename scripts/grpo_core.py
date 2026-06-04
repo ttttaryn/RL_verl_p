@@ -1,15 +1,15 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """GRPO (Group Relative Policy Optimization) 鈥?Core Algorithm Components.
 
-GRPO is the alignment algorithm behind DeepSeek-R1. It replaces PPO's
-critic-based GAE advantage with group-relative standardization, eliminating
-the value model entirely (~50% VRAM savings).
+GRPO is the alignment algorithm behind DeepSeek-R1-style math reasoning
+training. It replaces critic-based advantage estimation with group-relative
+standardization, eliminating the value model entirely.
 
-Key differences from PPO:
+Key properties:
   - No critic / value function
   - K responses sampled per prompt (group)
   - Advantage = (reward - group_mean) / group_std
-  - KL penalty baked into the reward (no separate KL controller)
+  - KL penalty in the policy objective
 
 Reference: DeepSeek-R1, "DeepSeekMath: Pushing the Limits of Mathematical
 Reasoning in Open Language Models" (2024)

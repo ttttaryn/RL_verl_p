@@ -1,8 +1,8 @@
 #!/bin/bash
 # GRPO Training Launcher for GSM8K Multi-Reward
 #
-# GRPO removes the critic model and is useful for quick reward/training validation.
-# The current trainer is intentionally single-process; use PPO/verl for 4-GPU runs.
+# GRPO removes the critic/value model and trains with group-relative advantages.
+# This launcher is single-process/single-GPU by design.
 #
 # Usage:
 #   ./scripts/train_grpo.sh
@@ -15,15 +15,21 @@ set -e
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 N_GPUS=1
-GROUP_SIZE=2
-BATCH_SIZE=1
-MAX_RESPONSE_LENGTH=128
+GROUP_SIZE=4
+BATCH_SIZE=2
+MAX_RESPONSE_LENGTH=256
 TOTAL_STEPS=1000
 CONFIG="config/grpo_gsm8k.yaml"
-MODEL="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 W_CORRECTNESS=0.7
 W_FORMAT=0.1
 W_REASONING=0.2
+REWARD_MODE="legacy_reasoning"
+USE_VLLM=true
+VLLM_SYNC_INTERVAL=1
+VLLM_GPU_MEMORY_UTILIZATION=0.25
+LR=""
+KL_COEF=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -32,15 +38,23 @@ while [[ $# -gt 0 ]]; do
     --batch-size)   BATCH_SIZE="$2"; shift 2 ;;
     --max-response-length) MAX_RESPONSE_LENGTH="$2"; shift 2 ;;
     --total-steps)  TOTAL_STEPS="$2"; shift 2 ;;
+    --lr)           LR="$2"; shift 2 ;;
+    --kl-coef)      KL_COEF="$2"; shift 2 ;;
     --config)       CONFIG="$2"; shift 2 ;;
     --model)        MODEL="$2"; shift 2 ;;
+    --reward-mode)  REWARD_MODE="$2"; shift 2 ;;
+    --use-vllm)     USE_VLLM=true; shift ;;
+    --no-vllm)      USE_VLLM=false; shift ;;
+    --vllm-sync-interval) VLLM_SYNC_INTERVAL="$2"; shift 2 ;;
+    --vllm-gpu-memory-utilization) VLLM_GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
     --w-correctness) W_CORRECTNESS="$2"; shift 2 ;;
     --w-format)     W_FORMAT="$2"; shift 2 ;;
     --w-reasoning)  W_REASONING="$2"; shift 2 ;;
     *)
       echo "Unknown option: $1"
       echo "Usage: $0 [--n-gpus N] [--group-size K] [--batch-size N] [--max-response-length N]"
-      echo "          [--total-steps N] [--model PATH]"
+      echo "          [--total-steps N] [--lr LR] [--kl-coef F] [--model PATH] [--reward-mode MODE]"
+      echo "          [--use-vllm|--no-vllm] [--vllm-sync-interval N] [--vllm-gpu-memory-utilization F]"
       echo "          [--w-correctness F] [--w-format F] [--w-reasoning F]"
       exit 1
       ;;
@@ -69,14 +83,24 @@ echo "  Batch size:   $BATCH_SIZE prompts/step"
 echo "  Max response: $MAX_RESPONSE_LENGTH tokens"
 echo "  Total steps:  $TOTAL_STEPS"
 echo "  Weights:      c=$W_CORRECTNESS f=$W_FORMAT r=$W_REASONING"
+echo "  Reward mode:  $REWARD_MODE"
+echo "  Rollout:      $([ "$USE_VLLM" = true ] && echo "vLLM" || echo "HF live policy")"
+if [ "$USE_VLLM" = true ]; then
+  echo "  vLLM sync:    every $VLLM_SYNC_INTERVAL step(s)"
+  echo "  vLLM mem util:$VLLM_GPU_MEMORY_UTILIZATION"
+fi
+if [ -n "$LR" ]; then
+  echo "  LR override:  $LR"
+fi
+if [ -n "$KL_COEF" ]; then
+  echo "  KL override:  $KL_COEF"
+fi
 echo "============================================"
 echo ""
 
-echo "VRAM comparison (Qwen2.5-0.5B, per A100 GPU):"
-echo "  PPO:   Actor(~2GB) + Critic(~2GB) + Ref(~2GB) + vLLM(~2GB) + Optim(~4GB) = ~12GB per GPU"
-echo "  GRPO:  Actor(~2GB) + Ref(~2GB) + Optim(~4GB) = ~8GB per GPU"
-echo "  GRPO saves ~2GB (17%) by removing the critic"
-echo "  Savings increase with model size (50% for 7B models)"
+echo "Runtime note (Qwen2.5-1.5B):"
+echo "  vLLM rollout is synchronized from the current policy by reloading a saved checkpoint."
+echo "  If OOM occurs, lower --vllm-gpu-memory-utilization or use --batch-size 1 --group-size 2."
 echo ""
 
 GRPO_ARGS=(
@@ -86,10 +110,27 @@ GRPO_ARGS=(
   --max-response-length "$MAX_RESPONSE_LENGTH"
   --total-steps "$TOTAL_STEPS"
   --model "$MODEL"
+  --reward-mode "$REWARD_MODE"
   --w-correctness "$W_CORRECTNESS"
   --w-format "$W_FORMAT"
   --w-reasoning "$W_REASONING"
 )
+
+if [ "$USE_VLLM" = true ]; then
+  GRPO_ARGS+=(--use-vllm)
+  GRPO_ARGS+=(--vllm-sync-interval "$VLLM_SYNC_INTERVAL")
+  GRPO_ARGS+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+else
+  GRPO_ARGS+=(--no-vllm)
+fi
+
+if [ -n "$LR" ]; then
+  GRPO_ARGS+=(--lr "$LR")
+fi
+
+if [ -n "$KL_COEF" ]; then
+  GRPO_ARGS+=(--kl-coef "$KL_COEF")
+fi
 
 echo "Launching on single GPU..."
 python scripts/train_grpo.py "${GRPO_ARGS[@]}"

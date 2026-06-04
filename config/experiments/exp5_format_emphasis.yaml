@@ -1,10 +1,10 @@
-# GRPO Experiment 4: Balanced Weights
+# GRPO Experiment 5: Format Emphasis
 
 defaults:
   - grpo_gsm8k
 
 trainer:
-  experiment_name: gsm8k_grpo_exp4_balanced
+  experiment_name: gsm8k_grpo_exp5_format_emphasis
 
 reward_mode: legacy_reasoning
 warmup_use_legacy_reward: true
@@ -12,8 +12,8 @@ warmup_use_legacy_reward: true
 custom_reward_function:
   name: compute_score
   reward_kwargs:
-    w_correctness: 0.6
-    w_format: 0.2
+    w_correctness: 0.5
+    w_format: 0.3
     w_reasoning: 0.2
     correctness_method: "flexible"
     answer_conditioned_reasoning: false

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """SFT Warmup — establish a proper baseline before RL training.
 
-Problem: Qwen2.5-0.5B-Instruct has ~6% GSM8K accuracy. RL training
-boosts this to ~50%, but most of the gain comes from learning the
-output format (27% → 97% format score), not math reasoning.
+Problem: small instruct models often learn GSM8K output format faster than
+robust mathematical reasoning during RL. SFT warmup establishes a stronger
+baseline before GRPO.
 
 This script performs supervised fine-tuning on GSM8K training data
 to establish a reasonable math-capable baseline BEFORE applying RL.
@@ -13,7 +13,7 @@ reasoning quality rather than format compliance.
 
 Usage:
     python scripts/sft_warmup.py \
-        --model Qwen/Qwen2.5-0.5B-Instruct \
+        --model Qwen/Qwen2.5-1.5B-Instruct \
         --train-data ~/data/gsm8k/train.parquet \
         --output ./checkpoints/sft_warmup \
         --epochs 3 \
@@ -161,7 +161,7 @@ def tokenize_dataset(dataset: Dataset, tokenizer, max_length: int = 1024):
 
 def main():
     parser = argparse.ArgumentParser(description="SFT warmup for GSM8K baseline")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--train-data", type=str, required=True,
                         help="Path to GSM8K train.parquet")
     parser.add_argument("--val-data", type=str, default=None,

@@ -1,15 +1,16 @@
 #!/bin/bash
 # ==============================================================================
-# 批量运行对照实验脚本 (Ablation Study)
+# GRPO Reward Ablation Runner for GSM8K
 # ==============================================================================
 #
-# 该脚本用于在 A100 多卡配置下运行多组奖励权重对照实验，默认入口为 4x A100
-# 每组实验使用不同的 (correctness, format, reasoning) 权重组合
+# Runs predefined GRPO reward-weight ablations with Qwen2.5-1.5B-Instruct or an
+# SFT warmup checkpoint. This script is GRPO-only.
 #
 # Usage:
-#   ./scripts/run_ablation_experiments.sh              # 运行所有预定义实验
-#   ./scripts/run_ablation_experiments.sh --dry-run    # 只打印配置，不实际运行
-#   ./scripts/run_ablation_experiments.sh --exp 1 3    # 只运行实验 1 和 3
+#   ./scripts/run_ablation_experiments.sh
+#   ./scripts/run_ablation_experiments.sh --dry-run
+#   ./scripts/run_ablation_experiments.sh --exp 1 3 6
+#   ./scripts/run_ablation_experiments.sh --model ./checkpoints/sft_warmup/final
 #
 # ==============================================================================
 
@@ -19,32 +20,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# ==============================================================================
-# 实验配置定义
-# 格式: "实验名称|正确性权重|格式权重|推理权重|描述"
-# ==============================================================================
 declare -a EXPERIMENTS=(
-    "baseline_correctness|1.0|0.0|0.0|基线：仅正确性奖励"
-    "default_multi|0.7|0.1|0.2|默认多奖励配置"
-    "high_correctness|0.8|0.1|0.1|高正确性权重"
-    "high_reasoning|0.5|0.1|0.4|高推理权重"
-    "balanced|0.6|0.2|0.2|平衡配置"
-    "format_emphasis|0.5|0.3|0.2|强调格式"
+    "correctness_only|1.0|0.0|0.0|legacy_reasoning|Correctness-only GRPO baseline"
+    "default_multi|0.7|0.1|0.2|legacy_reasoning|Default multi-reward GRPO"
+    "high_correctness|0.8|0.1|0.1|legacy_reasoning|Higher correctness weight"
+    "high_reasoning|0.5|0.1|0.4|legacy_reasoning|Higher reasoning-structure weight"
+    "format_emphasis|0.5|0.3|0.2|legacy_reasoning|Higher format weight"
+    "answer_conditioned_diagnostic|0.7|0.1|0.2|answer_conditioned_reasoning|Reward-hacking diagnostic run"
 )
 
-# ==============================================================================
-# 参数解析
-# ==============================================================================
 DRY_RUN=false
 SELECTED_EXPS=()
-EXTRA_ARGS=""
+MODEL="./checkpoints/sft_warmup/final"
+CONFIG="config/grpo_gsm8k.yaml"
+GROUP_SIZE=4
+BATCH_SIZE=2
+MAX_RESPONSE_LENGTH=256
+TOTAL_STEPS=1000
+LR=""
+KL_COEF=""
+USE_VLLM=true
+VLLM_SYNC_INTERVAL=1
+VLLM_GPU_MEMORY_UTILIZATION=0.25
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -59,26 +62,76 @@ while [[ $# -gt 0 ]]; do
                 shift
             done
             ;;
-        --model|--batch-size|--lr|--kl-coef|--epochs)
-            EXTRA_ARGS="$EXTRA_ARGS $1 $2"
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG="$2"
+            shift 2
+            ;;
+        --group-size)
+            GROUP_SIZE="$2"
+            shift 2
+            ;;
+        --batch-size)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --max-response-length)
+            MAX_RESPONSE_LENGTH="$2"
+            shift 2
+            ;;
+        --total-steps)
+            TOTAL_STEPS="$2"
+            shift 2
+            ;;
+        --lr)
+            LR="$2"
+            shift 2
+            ;;
+        --kl-coef)
+            KL_COEF="$2"
+            shift 2
+            ;;
+        --use-vllm)
+            USE_VLLM=true
+            shift
+            ;;
+        --no-vllm)
+            USE_VLLM=false
+            shift
+            ;;
+        --vllm-sync-interval)
+            VLLM_SYNC_INTERVAL="$2"
+            shift 2
+            ;;
+        --vllm-gpu-memory-utilization)
+            VLLM_GPU_MEMORY_UTILIZATION="$2"
             shift 2
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --dry-run          只打印配置，不实际运行"
-            echo "  --exp N [M ...]    只运行指定编号的实验（从1开始）"
-            echo "  --model PATH       指定模型路径"
-            echo "  --batch-size N     指定 batch size"
-            echo "  --lr VALUE         指定学习率"
-            echo "  --epochs N         指定训练轮数"
-            echo "  -h, --help         显示帮助信息"
+            echo "  --dry-run                 Print commands without running"
+            echo "  --exp N [M ...]           Run selected experiment numbers"
+            echo "  --model PATH              Model/SFT checkpoint path"
+            echo "  --config PATH             GRPO config path"
+            echo "  --group-size N            GRPO group size"
+            echo "  --batch-size N            Unique prompts per GRPO step"
+            echo "  --max-response-length N   Max response tokens"
+            echo "  --total-steps N           Training steps per experiment"
+            echo "  --lr VALUE                Actor learning rate"
+            echo "  --kl-coef VALUE           KL coefficient"
+            echo "  --use-vllm/--no-vllm      Select rollout engine"
+            echo "  --vllm-sync-interval N    Reload vLLM from policy every N steps"
+            echo "  --vllm-gpu-memory-utilization F"
             echo ""
-            echo "预定义实验:"
+            echo "Experiments:"
             for i in "${!EXPERIMENTS[@]}"; do
-                IFS='|' read -r name w_c w_f w_r desc <<< "${EXPERIMENTS[$i]}"
-                printf "  %d. %-20s (%.1f/%.1f/%.1f) - %s\n" $((i+1)) "$name" "$w_c" "$w_f" "$w_r" "$desc"
+                IFS='|' read -r name w_c w_f w_r reward_mode desc <<< "${EXPERIMENTS[$i]}"
+                printf "  %d. %-32s %s/%s/%s %-30s %s\n" $((i+1)) "$name" "$w_c" "$w_f" "$w_r" "$reward_mode" "$desc"
             done
             exit 0
             ;;
@@ -89,178 +142,136 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ==============================================================================
-# 打印实验计划
-# ==============================================================================
-echo -e "${BLUE}=============================================="
-echo "       批量对照实验 (Ablation Study)"
-echo "==============================================${NC}"
-echo ""
-
-# 确定要运行的实验
 if [[ ${#SELECTED_EXPS[@]} -eq 0 ]]; then
-    # 运行所有实验
     for i in "${!EXPERIMENTS[@]}"; do
         SELECTED_EXPS+=($((i+1)))
     done
 fi
 
-echo -e "${YELLOW}计划运行 ${#SELECTED_EXPS[@]} 个实验:${NC}"
-echo ""
-printf "%-4s %-22s %-15s %s\n" "No." "实验名称" "权重(C/F/R)" "描述"
-echo "--------------------------------------------------------------"
-
-for exp_num in "${SELECTED_EXPS[@]}"; do
-    idx=$((exp_num-1))
-    if [[ $idx -ge 0 && $idx -lt ${#EXPERIMENTS[@]} ]]; then
-        IFS='|' read -r name w_c w_f w_r desc <<< "${EXPERIMENTS[$idx]}"
-        printf "%-4d %-22s %-15s %s\n" "$exp_num" "$name" "$w_c/$w_f/$w_r" "$desc"
-    else
-        echo -e "${RED}警告: 实验 $exp_num 不存在，跳过${NC}"
-    fi
-done
-echo ""
-
-if [[ -n "$EXTRA_ARGS" ]]; then
-    echo -e "${YELLOW}额外参数: ${EXTRA_ARGS}${NC}"
-    echo ""
+echo -e "${BLUE}=============================================="
+echo "          GRPO Reward Ablation Study"
+echo "==============================================${NC}"
+echo "Model:              $MODEL"
+echo "Config:             $CONFIG"
+echo "Group size:         $GROUP_SIZE"
+echo "Batch size:         $BATCH_SIZE"
+echo "Max response length:$MAX_RESPONSE_LENGTH"
+echo "Total steps:        $TOTAL_STEPS"
+echo "Rollout:            $([ "$USE_VLLM" = true ] && echo "vLLM" || echo "HF live policy")"
+if [[ "$USE_VLLM" == true ]]; then
+    echo "vLLM sync interval: $VLLM_SYNC_INTERVAL"
+    echo "vLLM memory util:   $VLLM_GPU_MEMORY_UTILIZATION"
 fi
+echo ""
+
+build_command() {
+    local w_c="$1"
+    local w_f="$2"
+    local w_r="$3"
+    local reward_mode="$4"
+    local cmd="./scripts/train_grpo.sh --config $CONFIG --model $MODEL --group-size $GROUP_SIZE --batch-size $BATCH_SIZE --max-response-length $MAX_RESPONSE_LENGTH --total-steps $TOTAL_STEPS --reward-mode $reward_mode --w-correctness $w_c --w-format $w_f --w-reasoning $w_r"
+    if [[ -n "$LR" ]]; then
+        cmd="$cmd --lr $LR"
+    fi
+    if [[ -n "$KL_COEF" ]]; then
+        cmd="$cmd --kl-coef $KL_COEF"
+    fi
+    if [[ "$USE_VLLM" == true ]]; then
+        cmd="$cmd --use-vllm --vllm-sync-interval $VLLM_SYNC_INTERVAL --vllm-gpu-memory-utilization $VLLM_GPU_MEMORY_UTILIZATION"
+    else
+        cmd="$cmd --no-vllm"
+    fi
+    echo "$cmd"
+}
 
 if [[ "$DRY_RUN" == true ]]; then
-    echo -e "${YELLOW}[DRY RUN] 仅打印配置，不实际运行${NC}"
-    echo ""
+    echo -e "${YELLOW}[DRY RUN] Commands:${NC}"
     for exp_num in "${SELECTED_EXPS[@]}"; do
         idx=$((exp_num-1))
         if [[ $idx -ge 0 && $idx -lt ${#EXPERIMENTS[@]} ]]; then
-            IFS='|' read -r name w_c w_f w_r desc <<< "${EXPERIMENTS[$idx]}"
-            echo -e "${GREEN}实验 $exp_num ($name):${NC}"
-            echo "  ./scripts/train_4gpu.sh --w-correctness $w_c --w-format $w_f --w-reasoning $w_r $EXTRA_ARGS"
+            IFS='|' read -r name w_c w_f w_r reward_mode desc <<< "${EXPERIMENTS[$idx]}"
             echo ""
+            echo "# $exp_num. $name - $desc"
+            build_command "$w_c" "$w_f" "$w_r" "$reward_mode"
         fi
     done
     exit 0
 fi
 
-# ==============================================================================
-# 运行实验
-# ==============================================================================
-TOTAL=${#SELECTED_EXPS[@]}
-CURRENT=0
-FAILED=()
-SUCCEEDED=()
-
-# 创建实验汇总日志
-SUMMARY_LOG="${PROJECT_DIR}/outputs/logs/ablation_summary_$(date +%Y%m%d_%H%M%S).log"
+SUMMARY_LOG="${PROJECT_DIR}/outputs/logs/grpo_ablation_summary_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$(dirname "$SUMMARY_LOG")"
 
-echo "实验汇总日志: $SUMMARY_LOG"
-echo ""
-
 {
-    echo "=============================================="
-    echo "批量对照实验汇总"
-    echo "开始时间: $(date)"
-    echo "=============================================="
+    echo "GRPO ablation study"
+    echo "started_at=$(date -Iseconds)"
+    echo "model=$MODEL"
+    echo "config=$CONFIG"
+    echo "group_size=$GROUP_SIZE"
+    echo "batch_size=$BATCH_SIZE"
+    echo "max_response_length=$MAX_RESPONSE_LENGTH"
+    echo "total_steps=$TOTAL_STEPS"
     echo ""
 } > "$SUMMARY_LOG"
+
+FAILED=()
+SUCCEEDED=()
+TOTAL=${#SELECTED_EXPS[@]}
+CURRENT=0
 
 for exp_num in "${SELECTED_EXPS[@]}"; do
     idx=$((exp_num-1))
     if [[ $idx -lt 0 || $idx -ge ${#EXPERIMENTS[@]} ]]; then
+        echo -e "${RED}Skip unknown experiment: $exp_num${NC}"
         continue
     fi
-    
+
     CURRENT=$((CURRENT+1))
-    IFS='|' read -r name w_c w_f w_r desc <<< "${EXPERIMENTS[$idx]}"
-    
+    IFS='|' read -r name w_c w_f w_r reward_mode desc <<< "${EXPERIMENTS[$idx]}"
+    cmd=$(build_command "$w_c" "$w_f" "$w_r" "$reward_mode")
+
     echo -e "${BLUE}=============================================="
-    echo -e "实验 $CURRENT/$TOTAL: $name"
-    echo -e "权重: correctness=$w_c, format=$w_f, reasoning=$w_r"
-    echo -e "描述: $desc"
+    echo "Experiment $CURRENT/$TOTAL: $name"
+    echo "Weights: c=$w_c f=$w_f r=$w_r"
+    echo "Reward mode: $reward_mode"
+    echo "Description: $desc"
     echo -e "==============================================${NC}"
-    
-    START_TIME=$(date +%s)
-    
+
     {
-        echo "----------------------------------------------"
-        echo "实验 $exp_num: $name"
-        echo "权重: $w_c / $w_f / $w_r"
-        echo "描述: $desc"
-        echo "开始时间: $(date)"
+        echo "experiment=$name"
+        echo "weights=$w_c/$w_f/$w_r"
+        echo "reward_mode=$reward_mode"
+        echo "command=$cmd"
+        echo "started_at=$(date -Iseconds)"
     } >> "$SUMMARY_LOG"
-    
-    # 运行实验
-    if ./scripts/train_4gpu.sh \
-        --w-correctness "$w_c" \
-        --w-format "$w_f" \
-        --w-reasoning "$w_r" \
-        $EXTRA_ARGS; then
-        
+
+    START_TIME=$(date +%s)
+    if eval "$cmd"; then
         END_TIME=$(date +%s)
         DURATION=$((END_TIME - START_TIME))
-        
-        echo -e "${GREEN}✓ 实验 $name 完成 (耗时: ${DURATION}s)${NC}"
+        echo -e "${GREEN}Done: $name (${DURATION}s)${NC}"
         SUCCEEDED+=("$name")
-        
-        {
-            echo "状态: 成功"
-            echo "耗时: ${DURATION}s"
-            echo ""
-        } >> "$SUMMARY_LOG"
+        echo "status=success duration_seconds=$DURATION" >> "$SUMMARY_LOG"
     else
-        echo -e "${RED}✗ 实验 $name 失败${NC}"
+        echo -e "${RED}Failed: $name${NC}"
         FAILED+=("$name")
-        
-        {
-            echo "状态: 失败"
-            echo ""
-        } >> "$SUMMARY_LOG"
+        echo "status=failed" >> "$SUMMARY_LOG"
     fi
-    
-    # ==================================================================
-    # WandB 同步等待 - 确保数据完整上传后再开始下一个实验
-    # ==================================================================
-    echo -e "${YELLOW}等待 WandB 完成同步...${NC}"
-    sleep 15  # 等待15秒让 WandB 完成异步上传
-    
-    # 强制同步任何离线或未完成的数据
-    if command -v wandb &> /dev/null; then
-        echo "正在同步 WandB 数据..."
-        wandb sync --sync-all 2>/dev/null || true
-        sleep 5  # 额外等待同步命令完成
-    fi
-    
-    echo -e "${GREEN}WandB 同步完成${NC}"
-    echo ""
+    echo "" >> "$SUMMARY_LOG"
 done
 
-# ==============================================================================
-# 打印汇总
-# ==============================================================================
 echo -e "${BLUE}=============================================="
-echo "               实验汇总"
-echo "==============================================${NC}"
-echo -e "${GREEN}成功: ${#SUCCEEDED[@]}/${TOTAL}${NC}"
+echo "Summary"
+echo -e "==============================================${NC}"
+echo -e "${GREEN}Succeeded: ${#SUCCEEDED[@]}/${TOTAL}${NC}"
 for name in "${SUCCEEDED[@]}"; do
-    echo -e "  ${GREEN}✓${NC} $name"
+    echo "  $name"
 done
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-    echo -e "${RED}失败: ${#FAILED[@]}/${TOTAL}${NC}"
+    echo -e "${RED}Failed: ${#FAILED[@]}/${TOTAL}${NC}"
     for name in "${FAILED[@]}"; do
-        echo -e "  ${RED}✗${NC} $name"
+        echo "  $name"
     done
 fi
 
-{
-    echo "=============================================="
-    echo "实验汇总"
-    echo "结束时间: $(date)"
-    echo "成功: ${#SUCCEEDED[@]}/${TOTAL}"
-    echo "失败: ${#FAILED[@]}/${TOTAL}"
-    echo "=============================================="
-} >> "$SUMMARY_LOG"
-
-echo ""
-echo "汇总日志已保存到: $SUMMARY_LOG"
-echo -e "${BLUE}完成所有实验!${NC}"
+echo "Summary log: $SUMMARY_LOG"

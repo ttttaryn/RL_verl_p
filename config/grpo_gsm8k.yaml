@@ -1,12 +1,16 @@
 # GRPO Training Configuration for GSM8K with Multi-Reward System
 #
-# GRPO (Group Relative Policy Optimization) — the algorithm behind DeepSeek-R1.
-# Key advantage over PPO: NO critic/value model needed (~50% VRAM savings),
-# uses group-relative advantage instead of GAE.
+# This repo is GRPO-only. Legacy actor-critic training configs/scripts were removed from the main path.
+# The default reward mode is legacy_reasoning because it gives dense structure
+# signal during early GRPO training. Use answer_conditioned_reasoning for final
+# reward-hacking diagnostics and clean evaluation breakdowns.
 #
 # Use with: python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
 
-warmup_use_legacy_reward: true
+base_model: Qwen/Qwen2.5-1.5B-Instruct
+sft_checkpoint: ./checkpoints/sft_warmup/final
+reward_mode: legacy_reasoning        # legacy_reasoning | answer_conditioned_reasoning
+warmup_use_legacy_reward: true       # kept for backward-compatible trainer logic
 
 # ── Data ──────────────────────────────────────────────────────────────────
 data:
@@ -33,7 +37,7 @@ custom_reward_function:
 # ── Model (shared Actor + Reference, NO Critic) ──────────────────────────
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen2.5-0.5B-Instruct
+    path: Qwen/Qwen2.5-1.5B-Instruct
     use_remove_padding: True
 
   actor:
@@ -43,12 +47,16 @@ actor_rollout_ref:
     grpo_micro_batch_size_per_gpu: 1
 
   rollout:
-    name: hf_policy
-    use_vllm: false              # Keep rollout tied to live policy weights
+    name: vllm
+    use_vllm: true               # vLLM rollout with checkpoint-based policy sync
+    vllm_sync_interval: 1        # sync every N GRPO steps; 1 is closest to on-policy
+    vllm_sync_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}/_vllm_sync
+    vllm_dtype: float16
+    enforce_eager: false
     log_prob_micro_batch_size_per_gpu: 4
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.4
-    generation_batch_size: 1     # HF rollout generation micro-batch
+    gpu_memory_utilization: 0.25
+    generation_batch_size: 1     # HF fallback generation micro-batch
     temperature: 0.7
     top_p: 0.95
 

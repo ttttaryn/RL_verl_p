@@ -5,18 +5,20 @@ Usage:
     # Single GPU
     python scripts/train_grpo.py --config config/grpo_gsm8k.yaml
 
-    # This trainer is single-process/single-GPU. Use PPO/verl for multi-GPU.
+    # This trainer is single-process/single-GPU.
 
 Key features:
-  - No critic model needed (~50% VRAM savings vs PPO)
+  - No critic/value model needed
   - Group-relative advantage: (reward - group_mean) / group_std
   - KL penalty baked into the loss (no separate KL controller)
   - Compatible with the multi-reward system (correctness + format + reasoning)
 """
 
 import argparse
+import gc
 import json
 import os
+import shutil
 import sys
 import time
 from collections import defaultdict
@@ -69,13 +71,60 @@ except ModuleNotFoundError:
 
 def load_config(config_path: str) -> dict:
     """Load GRPO config and resolve OmegaConf-style interpolations."""
+    config_file = Path(config_path)
+
+    def deep_merge(base: dict, override: dict) -> dict:
+        result = dict(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
     if OmegaConf is not None:
         cfg = OmegaConf.load(config_path)
+        defaults = cfg.get("defaults", [])
+        if defaults:
+            merged = OmegaConf.create({})
+            for item in defaults:
+                if isinstance(item, str):
+                    name = item
+                elif isinstance(item, dict):
+                    name = next(iter(item.values()))
+                else:
+                    continue
+                if name == "_self_":
+                    continue
+                base_path = config_file.parent / f"{name}.yaml"
+                if not base_path.exists():
+                    base_path = config_file.parent.parent / f"{name}.yaml"
+                if base_path.exists():
+                    merged = OmegaConf.merge(merged, OmegaConf.load(base_path))
+            cfg = OmegaConf.merge(merged, cfg)
+            if "defaults" in cfg:
+                del cfg["defaults"]
         return OmegaConf.to_container(cfg, resolve=True)
 
     with open(config_path, "r", encoding="utf-8") as f:
         import yaml
         config = yaml.safe_load(f)
+
+    defaults = config.pop("defaults", [])
+    if defaults:
+        merged = {}
+        for item in defaults:
+            name = item if isinstance(item, str) else next(iter(item.values()), None)
+            if not name or name == "_self_":
+                continue
+            base_path = config_file.parent / f"{name}.yaml"
+            if not base_path.exists():
+                base_path = config_file.parent.parent / f"{name}.yaml"
+            if base_path.exists():
+                with open(base_path, "r", encoding="utf-8") as bf:
+                    base_cfg = yaml.safe_load(bf)
+                merged = deep_merge(merged, base_cfg)
+        config = deep_merge(merged, config)
 
     # Minimal fallback for this repo's config if omegaconf is unavailable.
     for key, value in config.get("data", {}).items():
@@ -161,9 +210,10 @@ class GSM8KDataset(Dataset):
 class RolloutEngine:
     """Generate responses from the current policy.
 
-    The training path intentionally uses the live HF policy model instead of a
-    separate vLLM engine. A static vLLM instance would keep sampling from stale
-    initial weights unless explicit weight synchronization is implemented.
+    vLLM is supported through checkpoint-based synchronization: the trainer
+    periodically saves the current HF policy to a local sync directory and
+    reloads the vLLM engine from that directory. This keeps rollout reasonably
+    close to the trained policy without using HF generate for sampling.
     """
 
     def __init__(self, model_path: str, temperature: float = 0.7,
@@ -171,31 +221,86 @@ class RolloutEngine:
                  gpu_memory_utilization: float = 0.5,
                  tensor_parallel_size: int = 1,
                  use_vllm: bool = False,
-                 generation_batch_size: int = 8):
+                 generation_batch_size: int = 8,
+                 vllm_dtype: str = "float16",
+                 enforce_eager: bool = False):
+        self.model_path = model_path
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
         self.generation_batch_size = generation_batch_size
+        self.gpu_memory_utilization = gpu_memory_utilization
+        self.tensor_parallel_size = tensor_parallel_size
+        self.vllm_dtype = vllm_dtype
+        self.enforce_eager = enforce_eager
         self._use_vllm = False
         self.llm = None
         self.model = None
         self.tokenizer = None
+        self.sampling_params = None
+        self._LLM = None
+        self._SamplingParams = None
 
         if use_vllm:
-            from vllm import LLM, SamplingParams
-            self.llm = LLM(
-                model=model_path,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-                trust_remote_code=True,
-            )
-            self.sampling_params = SamplingParams(
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-            )
+            try:
+                from vllm import LLM, SamplingParams
+            except ImportError as exc:
+                raise ImportError(
+                    "vLLM rollout requested but vllm is not installed. "
+                    "Install vllm or pass --no-vllm to use HF rollout."
+                ) from exc
+            self._LLM = LLM
+            self._SamplingParams = SamplingParams
+            self._load_vllm(model_path)
             self._use_vllm = True
-            print(f"  vLLM engine initialized (tp={tensor_parallel_size})")
+
+    def _load_vllm(self, model_path: str):
+        """Load a vLLM engine from a model path."""
+        self.model_path = model_path
+        self.llm = self._LLM(
+            model=model_path,
+            tensor_parallel_size=self.tensor_parallel_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            trust_remote_code=True,
+            dtype=self.vllm_dtype,
+            enforce_eager=self.enforce_eager,
+        )
+        self.sampling_params = self._SamplingParams(
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_tokens=self.max_tokens,
+        )
+        print(
+            "  vLLM engine initialized "
+            f"(model={model_path}, tp={self.tensor_parallel_size}, "
+            f"mem={self.gpu_memory_utilization}, dtype={self.vllm_dtype})"
+        )
+
+    def unload_vllm(self):
+        """Best-effort release of the current vLLM engine."""
+        if self.llm is not None:
+            del self.llm
+            self.llm = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def sync_from_hf_model(self, model, tokenizer, sync_dir: str, step: int):
+        """Save the current policy and reload vLLM from the saved checkpoint."""
+        if not self._use_vllm:
+            return
+
+        sync_root = Path(sync_dir)
+        sync_path = sync_root / "policy_current"
+        sync_root.mkdir(parents=True, exist_ok=True)
+
+        self.unload_vllm()
+        if sync_path.exists():
+            shutil.rmtree(sync_path)
+        model.save_pretrained(sync_path)
+        tokenizer.save_pretrained(sync_path)
+        self._load_vllm(str(sync_path))
+        print(f"  vLLM rollout synced from policy checkpoint at step {step}: {sync_path}")
 
     def set_hf_model(self, model, tokenizer):
         """Set the live HF policy model for rollout generation."""
@@ -210,6 +315,8 @@ class RolloutEngine:
                 for _ in range(n_samples):
                     all_prompts.append(p)
 
+            if self.llm is None:
+                raise RuntimeError("vLLM rollout engine was not initialized")
             outputs = self.llm.generate(all_prompts, self.sampling_params)
             return [o.outputs[0].text for o in outputs]
 
@@ -267,9 +374,8 @@ class RolloutEngine:
 class GRPOTrainer:
     """Self-contained GRPO trainer for LLM math reasoning.
 
-    Architecture (compared to PPO):
-      PPO:  Actor + Critic + Reference + Reward (4 models)
-      GRPO: Actor + Reference + Reward            (3 models, no Critic)
+    Architecture:
+      GRPO: Actor + Reference + Reward, no Critic/Value model
 
     The key innovation is replacing GAE with group-relative advantage:
     for each prompt, we sample K responses and standardize rewards within
@@ -303,6 +409,19 @@ class GRPOTrainer:
         self.log_dir = self.trainer_config.get("default_local_dir", "./checkpoints/grpo")
         self.project_name = self.trainer_config.get("project_name", "grpo")
         self.experiment_name = self.trainer_config.get("experiment_name", "gsm8k")
+        rollout_cfg = self.model_config.get("rollout", {})
+        self.use_vllm_rollout = bool(rollout_cfg.get("use_vllm", True))
+        self.vllm_sync_interval = int(rollout_cfg.get("vllm_sync_interval", 1))
+        self.vllm_sync_dir = rollout_cfg.get(
+            "vllm_sync_dir",
+            os.path.join(self.log_dir, "_vllm_sync"),
+        )
+        if isinstance(self.vllm_sync_dir, str):
+            self.vllm_sync_dir = (
+                self.vllm_sync_dir
+                .replace("${trainer.project_name}", str(self.project_name))
+                .replace("${trainer.experiment_name}", str(self.experiment_name))
+            )
 
         # Device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -317,7 +436,7 @@ class GRPOTrainer:
 
     def setup(self):
         """Initialize models, tokenizer, optimizer, and data."""
-        model_path = self.model_config.get("model", {}).get("path", "Qwen/Qwen2.5-0.5B-Instruct")
+        model_path = self.model_config.get("model", {}).get("path", "Qwen/Qwen2.5-1.5B-Instruct")
 
         if self.is_main:
             print(f"Loading model: {model_path}")
@@ -364,10 +483,6 @@ class GRPOTrainer:
         rollout_top_p = self.model_config.get("rollout", {}).get("top_p", 0.95)
         max_response_len = self.data_config.get("max_response_length", 512)
 
-        rollout_use_vllm = self.model_config.get("rollout", {}).get("use_vllm", False)
-        if rollout_use_vllm and self.is_main:
-            print("  Warning: vLLM rollout is static unless weight sync is implemented.")
-
         self.rollout = RolloutEngine(
             model_path=model_path,
             temperature=rollout_temp,
@@ -375,8 +490,10 @@ class GRPOTrainer:
             max_tokens=max_response_len,
             gpu_memory_utilization=self.model_config.get("rollout", {}).get("gpu_memory_utilization", 0.5),
             tensor_parallel_size=self.model_config.get("rollout", {}).get("tensor_model_parallel_size", 1),
-            use_vllm=rollout_use_vllm,
+            use_vllm=self.use_vllm_rollout,
             generation_batch_size=self.model_config.get("rollout", {}).get("generation_batch_size", 2),
+            vllm_dtype=self.model_config.get("rollout", {}).get("vllm_dtype", "float16"),
+            enforce_eager=bool(self.model_config.get("rollout", {}).get("enforce_eager", False)),
         )
         if not self.rollout._use_vllm:
             self.rollout.set_hf_model(self.policy, self.tokenizer)
@@ -405,18 +522,41 @@ class GRPOTrainer:
         self.reward_kwargs.setdefault("w_format", self.reward_weights["format"])
         self.reward_kwargs.setdefault("w_reasoning", self.reward_weights["reasoning"])
         self.reward_kwargs.setdefault("correctness_method", "flexible")
-        self.reward_kwargs.setdefault("answer_conditioned_reasoning", False)
-        self.warmup_use_legacy_reward = bool(self.config.get("warmup_use_legacy_reward", True))
+        reward_mode = self.config.get("reward_mode", "legacy_reasoning")
+        self.reward_kwargs.setdefault(
+            "answer_conditioned_reasoning",
+            reward_mode == "answer_conditioned_reasoning",
+        )
+        self.warmup_use_legacy_reward = bool(
+            self.config.get("warmup_use_legacy_reward", reward_mode == "legacy_reasoning")
+        )
 
         if self.is_main:
             print(f"  Train samples: {len(self.train_dataset)}")
             print(f"  Train batch size: {self.train_batch_size} prompts")
             print(f"  Group size: K={self.group_size}")
             print(f"  Max response len: {self.data_config.get('max_response_length', 256)} tokens")
-            print(f"  Reward mode: {'legacy warmup' if self.warmup_use_legacy_reward else 'answer-conditioned'}")
+            print(f"  Reward mode: {'legacy_reasoning' if self.warmup_use_legacy_reward else 'answer_conditioned_reasoning'}")
             print(f"  Reward weights: {self.reward_weights}")
+            print(f"  Rollout engine: {'vLLM' if self.use_vllm_rollout else 'HF live policy'}")
+            if self.use_vllm_rollout:
+                print(f"  vLLM sync interval: every {self.vllm_sync_interval} step(s)")
             print(f"  Learning rate: {self.lr}")
             print(f"  Total steps: {self.total_steps}")
+
+    def maybe_sync_vllm_rollout(self, step: int, force: bool = False):
+        """Synchronize vLLM rollout weights from the current policy."""
+        if not self.use_vllm_rollout:
+            return
+        if self.vllm_sync_interval <= 0:
+            return
+        if force or step % self.vllm_sync_interval == 0:
+            self.rollout.sync_from_hf_model(
+                self.policy,
+                self.tokenizer,
+                self.vllm_sync_dir,
+                step,
+            )
 
     def compute_rewards(self, prompts: List[str], responses: List[str],
                         ground_truths: List[str], data_sources: List[str]) -> List[Dict]:
@@ -668,6 +808,8 @@ class GRPOTrainer:
                 prompt_ids = batch["prompt_id"].tolist()
 
                 try:
+                    if step > 0:
+                        self.maybe_sync_vllm_rollout(step)
                     stats = self.training_step(
                         prompts, ground_truths, data_sources, prompt_ids,
                     )
@@ -717,6 +859,7 @@ class GRPOTrainer:
 
                 # Validation
                 if step % self.test_freq == 0:
+                    self.maybe_sync_vllm_rollout(step, force=True)
                     val_stats = self.validate()
                     if val_stats and self.is_main:
                         print(
@@ -735,9 +878,36 @@ class GRPOTrainer:
         with open(history_path, "w") as f:
             json.dump(dict(history), f, indent=2)
 
+        metadata_path = os.path.join(self.log_dir, "training_metadata.json")
+        training_metadata = {
+            "algorithm": "grpo",
+            "base_model": self.config.get("base_model", "Qwen/Qwen2.5-1.5B-Instruct"),
+            "sft_checkpoint": self.config.get("sft_checkpoint", "./checkpoints/sft_warmup/final"),
+            "grpo_config": self.config.get("grpo_config", "config/grpo_gsm8k.yaml"),
+            "reward_mode": "legacy_reasoning" if self.warmup_use_legacy_reward else "answer_conditioned_reasoning",
+            "reward_modes": {
+                "legacy_reasoning": "Used for warmup/training or comparison; reasoning is heuristic and not gated on correctness.",
+                "answer_conditioned_reasoning": "Used for final diagnostics and reward-hacking checks; reasoning reward is gated on correctness.",
+            },
+            "group_size": self.group_size,
+            "batch_size": self.train_batch_size,
+            "temperature": self.model_config.get("rollout", {}).get("temperature", 0.7),
+            "kl_coef": self.kl_coef,
+            "rollout_engine": "vllm" if self.use_vllm_rollout else "hf_policy",
+            "vllm_sync_interval": self.vllm_sync_interval if self.use_vllm_rollout else None,
+            "vllm_sync_dir": self.vllm_sync_dir if self.use_vllm_rollout else None,
+            "vllm_gpu_memory_utilization": self.model_config.get("rollout", {}).get("gpu_memory_utilization", None),
+            "vllm_dtype": self.model_config.get("rollout", {}).get("vllm_dtype", None),
+            "reward_weights": self.reward_weights,
+            "total_steps": self.total_steps,
+        }
+        with open(metadata_path, "w") as f:
+            json.dump(training_metadata, f, indent=2)
+
         if self.is_main:
             print(f"\nTraining complete. Model saved to {final_path}")
             print(f"Training history saved to {history_path}")
+            print(f"Training metadata saved to {metadata_path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
@@ -755,10 +925,27 @@ def main():
     parser.add_argument("--max-response-length", type=int, default=None)
     parser.add_argument("--total-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--kl-coef", type=float, default=None)
     parser.add_argument("--model", type=str, default=None)
+    rollout_group = parser.add_mutually_exclusive_group()
+    rollout_group.add_argument("--use-vllm", action="store_true", default=None,
+                               help="Use vLLM for rollout generation")
+    rollout_group.add_argument("--no-vllm", action="store_true", default=None,
+                               help="Use HF live policy generate instead of vLLM")
+    parser.add_argument("--vllm-sync-interval", type=int, default=None,
+                        help="Reload vLLM from current policy every N GRPO steps")
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=None,
+                        help="vLLM gpu_memory_utilization")
+    parser.add_argument(
+        "--reward-mode",
+        choices=["legacy_reasoning", "answer_conditioned_reasoning"],
+        default=None,
+        help="legacy_reasoning for dense training signal; answer_conditioned_reasoning for reward-hacking diagnostics",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    config["grpo_config"] = args.config
 
     # CLI overrides
     if args.w_correctness is not None or args.w_format is not None or args.w_reasoning is not None:
@@ -780,8 +967,26 @@ def main():
         config["trainer"]["total_training_steps"] = args.total_steps
     if args.lr is not None:
         config["actor_rollout_ref"]["actor"]["optim"]["lr"] = args.lr
+    if args.kl_coef is not None:
+        config["algorithm"].setdefault("kl_penalty", {})["kl_coef"] = args.kl_coef
     if args.model is not None:
         config["actor_rollout_ref"]["model"]["path"] = args.model
+    rollout_cfg = config.setdefault("actor_rollout_ref", {}).setdefault("rollout", {})
+    if args.use_vllm:
+        rollout_cfg["use_vllm"] = True
+        rollout_cfg["name"] = "vllm"
+    if args.no_vllm:
+        rollout_cfg["use_vllm"] = False
+        rollout_cfg["name"] = "hf_policy"
+    if args.vllm_sync_interval is not None:
+        rollout_cfg["vllm_sync_interval"] = args.vllm_sync_interval
+    if args.vllm_gpu_memory_utilization is not None:
+        rollout_cfg["gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
+    if args.reward_mode is not None:
+        config["reward_mode"] = args.reward_mode
+        config["warmup_use_legacy_reward"] = args.reward_mode == "legacy_reasoning"
+        reward_kwargs = config.setdefault("custom_reward_function", {}).setdefault("reward_kwargs", {})
+        reward_kwargs["answer_conditioned_reasoning"] = args.reward_mode == "answer_conditioned_reasoning"
 
     trainer = GRPOTrainer(config)
     trainer.train()

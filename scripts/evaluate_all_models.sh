@@ -31,7 +31,17 @@ NC='\033[0m' # No Color
 # 格式: "模型HF路径|正确性权重|格式权重|推理权重|描述"
 # ==============================================================================
 HF_USER="leixinlin"
-BASE_MODEL_NAME="qwen2.5-0.5b-gsm8k-rl"
+BASE_MODEL_NAME="qwen2.5-1.5b-gsm8k-grpo"
+BASE_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
+SFT_CHECKPOINT="./checkpoints/sft_warmup/final"
+GRPO_CONFIG="config/grpo_gsm8k.yaml"
+REWARD_MODE="answer_conditioned_reasoning"
+GROUP_SIZE=4
+TRAIN_BATCH_SIZE=2
+KL_COEF=0.001
+ROLLOUT_ENGINE="vllm"
+VLLM_SYNC_INTERVAL=1
+VLLM_GPU_MEMORY_UTILIZATION=0.25
 
 declare -a MODELS=(
     "${HF_USER}/${BASE_MODEL_NAME}-w1.0_0.0_0.0|1.0|0.0|0.0|基线：仅正确性奖励"
@@ -78,6 +88,34 @@ while [[ $# -gt 0 ]]; do
             TEMPERATURE="$2"
             shift 2
             ;;
+        --reward-mode)
+            REWARD_MODE="$2"
+            shift 2
+            ;;
+        --group-size)
+            GROUP_SIZE="$2"
+            shift 2
+            ;;
+        --train-batch-size)
+            TRAIN_BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --kl-coef)
+            KL_COEF="$2"
+            shift 2
+            ;;
+        --rollout-engine)
+            ROLLOUT_ENGINE="$2"
+            shift 2
+            ;;
+        --vllm-sync-interval)
+            VLLM_SYNC_INTERVAL="$2"
+            shift 2
+            ;;
+        --vllm-gpu-memory-utilization)
+            VLLM_GPU_MEMORY_UTILIZATION="$2"
+            shift 2
+            ;;
         --results-dir)
             RESULTS_DIR="$2"
             shift 2
@@ -91,6 +129,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --batch-size N         批量推理大小 (默认: 16)"
             echo "  --max-tokens N         最大生成 token 数"
             echo "  --temperature VALUE    采样温度 (0 为贪婪解码)"
+            echo "  --reward-mode MODE     记录到结果 JSON 的 reward mode"
+            echo "  --group-size N         记录到结果 JSON 的 GRPO group size"
+            echo "  --train-batch-size N   记录到结果 JSON 的 GRPO train batch size"
+            echo "  --kl-coef VALUE        记录到结果 JSON 的 KL 系数"
+            echo "  --rollout-engine NAME  记录到结果 JSON 的 rollout engine"
+            echo "  --vllm-sync-interval N"
+            echo "  --vllm-gpu-memory-utilization F"
             echo "  --results-dir PATH     结果保存目录"
             echo "  -h, --help             显示帮助信息"
             echo ""
@@ -126,6 +171,13 @@ echo "  评估样本数:   $NUM_SAMPLES (-1 表示全部)"
 echo "  批量大小:     $BATCH_SIZE"
 echo "  最大 tokens:  $MAX_TOKENS"
 echo "  温度:         $TEMPERATURE"
+echo "  Reward mode:  $REWARD_MODE"
+echo "  Group size:   $GROUP_SIZE"
+echo "  Train batch:  $TRAIN_BATCH_SIZE"
+echo "  KL coef:      $KL_COEF"
+echo "  Rollout:      $ROLLOUT_ENGINE"
+echo "  vLLM sync:    $VLLM_SYNC_INTERVAL"
+echo "  vLLM mem:     $VLLM_GPU_MEMORY_UTILIZATION"
 echo "  可用 GPU 数:  $NUM_GPUS"
 echo ""
 echo -e "${YELLOW}待评估模型 (${#MODELS[@]} 个):${NC}"
@@ -155,6 +207,16 @@ if [[ "$DRY_RUN" == true ]]; then
         echo "    --batch-size $BATCH_SIZE \\"
         echo "    --max-tokens $MAX_TOKENS \\"
         echo "    --temperature $TEMPERATURE \\"
+        echo "    --base-model-name \"$BASE_MODEL\" \\"
+        echo "    --sft-checkpoint \"$SFT_CHECKPOINT\" \\"
+        echo "    --grpo-config \"$GRPO_CONFIG\" \\"
+        echo "    --reward-mode \"$REWARD_MODE\" \\"
+        echo "    --group-size $GROUP_SIZE \\"
+        echo "    --train-batch-size $TRAIN_BATCH_SIZE \\"
+        echo "    --kl-coef $KL_COEF \\"
+        echo "    --rollout-engine \"$ROLLOUT_ENGINE\" \\"
+        echo "    --vllm-sync-interval $VLLM_SYNC_INTERVAL \\"
+        echo "    --vllm-gpu-memory-utilization $VLLM_GPU_MEMORY_UTILIZATION \\"
         echo "    --w-correctness $w_c \\"
         echo "    --w-format $w_f \\"
         echo "    --w-reasoning $w_r"
@@ -199,6 +261,16 @@ for i in "${!MODELS[@]}"; do
         --batch-size $BATCH_SIZE \
         --max-tokens $MAX_TOKENS \
         --temperature $TEMPERATURE \
+        --base-model-name "$BASE_MODEL" \
+        --sft-checkpoint "$SFT_CHECKPOINT" \
+        --grpo-config "$GRPO_CONFIG" \
+        --reward-mode "$REWARD_MODE" \
+        --group-size $GROUP_SIZE \
+        --train-batch-size $TRAIN_BATCH_SIZE \
+        --kl-coef $KL_COEF \
+        --rollout-engine "$ROLLOUT_ENGINE" \
+        --vllm-sync-interval $VLLM_SYNC_INTERVAL \
+        --vllm-gpu-memory-utilization $VLLM_GPU_MEMORY_UTILIZATION \
         --w-correctness $w_c \
         --w-format $w_f \
         --w-reasoning $w_r \
